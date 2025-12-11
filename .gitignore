@@ -1,0 +1,143 @@
+# Compiled Object files
+*.o
+*.ko
+*.obj
+*.elf
+*.lo
+*.slo
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.so
+*.so.*
+*.dylib
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.exe
+*.out
+*.app
+
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+
+# Linux kernel build artifacts
+*.symtypes
+*.order
+.config
+.config.old
+*.dtb
+*.dtb.S
+*.dtbo
+*.dts.tmp
+vmlinux*
+System.map
+arch/*/boot/bzImage
+arch/*/boot/Image
+arch/*/boot/zImage
+arch/*/boot/uImage
+arch/*/boot/compressed/vmlinux
+arch/*/boot/dts/*.dtb
+
+# Buildroot output
+output/
+dl/
+*.depend
+
+# U-Boot
+u-boot.bin
+u-boot.map
+u-boot.lds
+u-boot.img
+u-boot.srec
+u-boot.rom
+
+# Editor and IDE files
+*~
+*.swp
+*.swo
+*.bak
+*.orig
+*.rej
+.*.sw?
+.DS_Store
+*.patch
+*.diff
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Eclipse
+.project
+.cproject
+.settings/
+
+# Tags and cscope
+tags
+TAGS
+cscope.*
+GPATH
+GRTAGS
+GTAGS
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.cache
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+*.pyc
+
+# Compressed files (if generated)
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.bz2
+*.xz
+
+# Binary executables from app_utils
+KSZ/app_utils/lan8770_app/lan8770_app
+KSZ/app_utils/mdio-tool/mdio-tool
+KSZ/app_utils/ptp_cli/ptp_cli
+KSZ/app_utils/ptp_cli/mrp_cli
+KSZ/app_utils/regs_bin/regs_bin
+
+# Downloaded packages and toolchains
+*.tar.bz2
+*.tar.xz
+*.rpm
+*.deb
+
+# Generated documentation
+*.html.tmp
+*.pdf.tmp
+
+# Backup files
+*.backup
+*-backup
+
+# Keep important gitignore files
+!.gitignore
+!**/.gitignore
