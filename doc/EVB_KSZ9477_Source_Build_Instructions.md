@@ -24,6 +24,16 @@ apt-get install sed make binutils gcc g++ bash patch gzip bzip2 perl tar cpio py
 For more information about Buildroot for Atmel SAMA5 processors, visit:
 http://www.at91.com/linux4sam/bin/view/Linux4SAM/BuildRootBuild
 
+### Tested Build Environment
+
+This document has been verified to work with the following build environment:
+
+- **Operating System**: Ubuntu 20.04.5 LTS
+- **Kernel**: Linux 5.15.0-139-generic
+- **Architecture**: x86-64
+- **GCC Version**: 9.4.0
+- **Binutils**: 2.34
+
 ---
 
 ## Build Instructions
