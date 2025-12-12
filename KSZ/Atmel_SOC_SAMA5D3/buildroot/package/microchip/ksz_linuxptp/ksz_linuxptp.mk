@@ -6,7 +6,7 @@
 
 KSZ_LINUXPTP_VERSION = 0
 #KSZ_LINUXPTP_SOURCE = ksz_linuxptp.tar.bz2
-KSZ_LINUXPTP_SITE = $(KSZ_HOME)/ptp/linuxptp/main
+KSZ_LINUXPTP_SITE = $(KSZ_HOME)/ptp/linuxptp/linuxptp-4.0.0
 KSZ_LINUXPTP_SITE_METHOD = local
 KSZ_LINUXPTP_LICENSE = GPLv2
 
