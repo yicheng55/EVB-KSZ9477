@@ -60,6 +60,8 @@ cd Atmel_SOC_SAMA5D3/buildroot
 
 Decide whether you need NAND flash image or SD card image:
 
+*** 原始檔 .pdf 說明錯誤，已修正如下 ***
+
 **For NAND flash image:**
 ```bash
 make atmel_sama5d3_xplained_ksz_5_4_defconfig
