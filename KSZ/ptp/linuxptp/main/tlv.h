@@ -20,6 +20,8 @@
 #ifndef HAVE_TLV_H
 #define HAVE_TLV_H
 
+#include <sys/queue.h>
+
 #include "ddt.h"
 #include "ds.h"
 
@@ -33,10 +35,25 @@
 #define TLV_ACKNOWLEDGE_CANCEL_UNICAST_TRANSMISSION	0x0007
 #define TLV_PATH_TRACE					0x0008
 #define TLV_ALTERNATE_TIME_OFFSET_INDICATOR		0x0009
-#define TLV_AUTHENTICATION				0x2000
+#define TLV_AUTHENTICATION_2008				0x2000
 #define TLV_AUTHENTICATION_CHALLENGE			0x2001
 #define TLV_SECURITY_ASSOCIATION_UPDATE			0x2002
 #define TLV_CUM_FREQ_SCALE_FACTOR_OFFSET		0x2003
+#define TLV_PTPMON_REQ					0x21FE
+#define TLV_PTPMON_RESP					0x21FF
+#define TLV_ORGANIZATION_EXTENSION_PROPAGATE		0x4000
+#define TLV_ENHANCED_ACCURACY_METRICS			0x4001
+#define TLV_ORGANIZATION_EXTENSION_DO_NOT_PROPAGATE	0x8000
+#define TLV_L1_SYNC					0x8001
+#define TLV_PORT_COMMUNICATION_AVAILABILITY		0x8002
+#define TLV_PROTOCOL_ADDRESS				0x8003
+#define TLV_SLAVE_RX_SYNC_TIMING_DATA			0x8004
+#define TLV_SLAVE_RX_SYNC_COMPUTED_DATA			0x8005
+#define TLV_SLAVE_TX_EVENT_TIMESTAMPS			0x8006
+#define TLV_SLAVE_DELAY_TIMING_DATA_NP			0x7F00
+#define TLV_CUMULATIVE_RATE_RATIO			0x8007
+#define TLV_PAD						0x8008
+#define TLV_AUTHENTICATION				0x8009
 
 enum management_action {
 	GET,
@@ -47,80 +64,147 @@ enum management_action {
 };
 
 /* Clock management ID values */
-#define TLV_USER_DESCRIPTION				0x0002
-#define TLV_SAVE_IN_NON_VOLATILE_STORAGE		0x0003
-#define TLV_RESET_NON_VOLATILE_STORAGE			0x0004
-#define TLV_INITIALIZE					0x0005
-#define TLV_FAULT_LOG					0x0006
-#define TLV_FAULT_LOG_RESET				0x0007
-#define TLV_DEFAULT_DATA_SET				0x2000
-#define TLV_CURRENT_DATA_SET				0x2001
-#define TLV_PARENT_DATA_SET				0x2002
-#define TLV_TIME_PROPERTIES_DATA_SET			0x2003
-#define TLV_PRIORITY1					0x2005
-#define TLV_PRIORITY2					0x2006
-#define TLV_DOMAIN					0x2007
-#define TLV_SLAVE_ONLY					0x2008
-#define TLV_TIME					0x200F
-#define TLV_CLOCK_ACCURACY				0x2010
-#define TLV_UTC_PROPERTIES				0x2011
-#define TLV_TRACEABILITY_PROPERTIES			0x2012
-#define TLV_TIMESCALE_PROPERTIES			0x2013
-#define TLV_PATH_TRACE_LIST				0x2015
-#define TLV_PATH_TRACE_ENABLE				0x2016
-#define TLV_GRANDMASTER_CLUSTER_TABLE			0x2017
-#define TLV_ACCEPTABLE_MASTER_TABLE			0x201A
-#define TLV_ACCEPTABLE_MASTER_MAX_TABLE_SIZE		0x201C
-#define TLV_ALTERNATE_TIME_OFFSET_ENABLE		0x201E
-#define TLV_ALTERNATE_TIME_OFFSET_NAME			0x201F
-#define TLV_ALTERNATE_TIME_OFFSET_MAX_KEY		0x2020
-#define TLV_ALTERNATE_TIME_OFFSET_PROPERTIES		0x2021
-#define TLV_TRANSPARENT_CLOCK_DEFAULT_DATA_SET		0x4000
-#define TLV_PRIMARY_DOMAIN				0x4002
-#define TLV_TIME_STATUS_NP				0xC000
-#define TLV_GRANDMASTER_SETTINGS_NP			0xC001
-#define TLV_SUBSCRIBE_EVENTS_NP				0xC003
+#define MID_USER_DESCRIPTION				0x0002
+#define MID_SAVE_IN_NON_VOLATILE_STORAGE		0x0003
+#define MID_RESET_NON_VOLATILE_STORAGE			0x0004
+#define MID_INITIALIZE					0x0005
+#define MID_FAULT_LOG					0x0006
+#define MID_FAULT_LOG_RESET				0x0007
+#define MID_DEFAULT_DATA_SET				0x2000
+#define MID_CURRENT_DATA_SET				0x2001
+#define MID_PARENT_DATA_SET				0x2002
+#define MID_TIME_PROPERTIES_DATA_SET			0x2003
+#define MID_PRIORITY1					0x2005
+#define MID_PRIORITY2					0x2006
+#define MID_DOMAIN					0x2007
+#define MID_SLAVE_ONLY					0x2008
+#define MID_TIME					0x200F
+#define MID_CLOCK_ACCURACY				0x2010
+#define MID_UTC_PROPERTIES				0x2011
+#define MID_TRACEABILITY_PROPERTIES			0x2012
+#define MID_TIMESCALE_PROPERTIES			0x2013
+#define MID_PATH_TRACE_LIST				0x2015
+#define MID_PATH_TRACE_ENABLE				0x2016
+#define MID_GRANDMASTER_CLUSTER_TABLE			0x2017
+#define MID_ACCEPTABLE_MASTER_TABLE			0x201A
+#define MID_ACCEPTABLE_MASTER_MAX_TABLE_SIZE		0x201C
+#define MID_ALTERNATE_TIME_OFFSET_ENABLE		0x201E
+#define MID_ALTERNATE_TIME_OFFSET_NAME			0x201F
+#define MID_ALTERNATE_TIME_OFFSET_MAX_KEY		0x2020
+#define MID_ALTERNATE_TIME_OFFSET_PROPERTIES		0x2021
+#define MID_EXTERNAL_PORT_CONFIGURATION_ENABLED		0x3000
+#define MID_HOLDOVER_UPGRADE_ENABLE			0x3002
+#define MID_TRANSPARENT_CLOCK_DEFAULT_DATA_SET		0x4000
+#define MID_PRIMARY_DOMAIN				0x4002
+#define MID_TIME_STATUS_NP				0xC000
+#define MID_GRANDMASTER_SETTINGS_NP			0xC001
+#define MID_SUBSCRIBE_EVENTS_NP				0xC003
+#define MID_SYNCHRONIZATION_UNCERTAIN_NP		0xC006
 
 /* Port management ID values */
-#define TLV_NULL_MANAGEMENT				0x0000
-#define TLV_CLOCK_DESCRIPTION				0x0001
-#define TLV_PORT_DATA_SET				0x2004
-#define TLV_LOG_ANNOUNCE_INTERVAL			0x2009
-#define TLV_ANNOUNCE_RECEIPT_TIMEOUT			0x200A
-#define TLV_LOG_SYNC_INTERVAL				0x200B
-#define TLV_VERSION_NUMBER				0x200C
-#define TLV_ENABLE_PORT					0x200D
-#define TLV_DISABLE_PORT				0x200E
-#define TLV_UNICAST_NEGOTIATION_ENABLE			0x2014
-#define TLV_UNICAST_MASTER_TABLE			0x2018
-#define TLV_UNICAST_MASTER_MAX_TABLE_SIZE		0x2019
-#define TLV_ACCEPTABLE_MASTER_TABLE_ENABLED		0x201B
-#define TLV_ALTERNATE_MASTER				0x201D
-#define TLV_TRANSPARENT_CLOCK_PORT_DATA_SET		0x4001
-#define TLV_DELAY_MECHANISM				0x6000
-#define TLV_LOG_MIN_PDELAY_REQ_INTERVAL			0x6001
-#define TLV_PORT_DATA_SET_NP				0xC002
-#define TLV_PORT_PROPERTIES_NP				0xC004
-
-#ifdef KSZ_1588_PTP
-#define TLV_MASTER_ONLY					0x8001
-#define TLV_INITIAL_LOG_PDELAY_REQ_INTERVAL		0x8002
-#define TLV_OPER_LOG_PDELAY_REQ_INTERVAL		0x8003
-#define TLV_INITIAL_LOG_SYNC_INTERVAL			0x8004
-#define TLV_OPER_LOG_SYNC_INTERVAL			0x8005
-#define TLV_NEIGHBOR_PROP_DELAY				0x8007
-#define TLV_WAKE_INFO					0x8008
-#define TLV_INTERVAL_INFO				0x9001
-#endif
+#define MID_NULL_MANAGEMENT				0x0000
+#define MID_CLOCK_DESCRIPTION				0x0001
+#define MID_PORT_DATA_SET				0x2004
+#define MID_LOG_ANNOUNCE_INTERVAL			0x2009
+#define MID_ANNOUNCE_RECEIPT_TIMEOUT			0x200A
+#define MID_LOG_SYNC_INTERVAL				0x200B
+#define MID_VERSION_NUMBER				0x200C
+#define MID_ENABLE_PORT					0x200D
+#define MID_DISABLE_PORT				0x200E
+#define MID_UNICAST_NEGOTIATION_ENABLE			0x2014
+#define MID_UNICAST_MASTER_TABLE			0x2018
+#define MID_UNICAST_MASTER_MAX_TABLE_SIZE		0x2019
+#define MID_ACCEPTABLE_MASTER_TABLE_ENABLED		0x201B
+#define MID_ALTERNATE_MASTER				0x201D
+#define MID_MASTER_ONLY					0x3001
+#define MID_EXT_PORT_CONFIG_PORT_DATA_SET		0x3003
+#define MID_SLAVE_EVENT_MONITORING			0x3004	// TODO - proposed value, missing in 1588 v2.1
+#define MID_TRANSPARENT_CLOCK_PORT_DATA_SET		0x4001
+#define MID_DELAY_MECHANISM				0x6000
+#define MID_LOG_MIN_PDELAY_REQ_INTERVAL			0x6001
+#define MID_PORT_DATA_SET_NP				0xC002
+#define MID_PORT_PROPERTIES_NP				0xC004
+#define MID_PORT_STATS_NP				0xC005
+#define MID_PORT_SERVICE_STATS_NP			0xC007
+#define MID_UNICAST_MASTER_TABLE_NP			0xC008
+#define MID_PORT_HWCLOCK_NP				0xC009
+#define MID_POWER_PROFILE_SETTINGS_NP			0xC00A
 
 /* Management error ID values */
-#define TLV_RESPONSE_TOO_BIG				0x0001
-#define TLV_NO_SUCH_ID					0x0002
-#define TLV_WRONG_LENGTH				0x0003
-#define TLV_WRONG_VALUE					0x0004
-#define TLV_NOT_SETABLE					0x0005
-#define TLV_NOT_SUPPORTED				0x0006
-#define TLV_GENERAL_ERROR				0xFFFE
+#define MID_RESPONSE_TOO_BIG				0x0001
+#define MID_NO_SUCH_ID					0x0002
+#define MID_WRONG_LENGTH				0x0003
+#define MID_WRONG_VALUE					0x0004
+#define MID_NOT_SETABLE					0x0005
+#define MID_NOT_SUPPORTED				0x0006
+#define MID_GENERAL_ERROR				0xFFFE
+
+/* Values for the SYNCHRONIZATION_UNCERTAIN_NP management TLV */
+#define SYNC_UNCERTAIN_DONTCARE	0xff
+#define SYNC_UNCERTAIN_FALSE	0
+#define SYNC_UNCERTAIN_TRUE	1
+
+#define CANCEL_UNICAST_MAINTAIN_REQUEST	(1 << 0)
+#define CANCEL_UNICAST_MAINTAIN_GRANT	(1 << 1)
+#define GRANT_UNICAST_RENEWAL_INVITED	(1 << 0)
+
+/* Flags in PORT_HWCLOCK_NP */
+#define PORT_HWCLOCK_VCLOCK		(1 << 0)
+
+struct ack_cancel_unicast_xmit_tlv {
+	Enumeration16   type;
+	UInteger16      length;
+	uint8_t         message_type_flags;
+	uint8_t         reserved;
+} PACKED;
+
+struct cancel_unicast_xmit_tlv {
+	Enumeration16   type;
+	UInteger16      length;
+	uint8_t         message_type_flags;
+	uint8_t         reserved;
+} PACKED;
+
+struct grant_unicast_xmit_tlv {
+	Enumeration16   type;
+	UInteger16      length;
+	uint8_t         message_type;
+	Integer8        logInterMessagePeriod;
+	UInteger32      durationField;
+	uint8_t         reserved;
+	uint8_t         flags;
+} PACKED;
+
+struct alternate_time_offset_indicator_tlv {
+	Enumeration16   type;
+	UInteger16      length;
+	UInteger8       keyField;
+	/* Message alignment broken by design. */
+	Integer32       currentOffset;
+	Integer32       jumpSeconds;
+	struct {
+		uint16_t   seconds_msb; /* 16 bits + */
+		uint32_t   seconds_lsb; /* 32 bits = 48 bits*/
+	} PACKED timeOfNextJump;
+	struct PTPText  displayName;
+} PACKED;
+
+struct alternate_time_offset_name {
+	UInteger8       keyField;
+	struct PTPText  displayName;
+} PACKED;
+
+struct alternate_time_offset_properties {
+	UInteger8       keyField;
+	/* Message alignment broken by design. */
+	Integer32       currentOffset;
+	Integer32       jumpSeconds;
+	struct {
+		uint16_t   seconds_msb; /* 16 bits + */
+		uint32_t   seconds_lsb; /* 32 bits = 48 bits*/
+	} PACKED timeOfNextJump;
+	uint8_t pad;
+} PACKED;
 
 struct management_tlv {
 	Enumeration16 type;
@@ -143,13 +227,26 @@ struct management_error_status {
 	Octet         data[0];
 } PACKED;
 
+struct nsm_resp_tlv_head {
+	Enumeration16           type;
+	UInteger16              length;
+	uint8_t                 port_state;
+	uint8_t                 reserved;
+	struct PortAddress      parent_addr;
+} PACKED;
+
+struct nsm_resp_tlv_foot {
+	struct parentDS         parent;
+	struct currentDS        current;
+	struct timePropertiesDS timeprop;
+	struct Timestamp        lastsync;
+} PACKED;
+
 /* Organizationally Unique Identifiers */
 #define IEEE_802_1_COMMITTEE 0x00, 0x80, 0xC2
 extern uint8_t ieee8021_id[3];
-#ifdef KSZ_1588_PTP
-#define IEEE_C37_238 0x1C, 0x12, 0x9D
-extern uint8_t ieee_c37_238_id[3];
-#endif
+#define IEEE_C37_238_PROFILE 0x1C, 0x12, 0x9D
+extern uint8_t ieeec37_238_id[3];
 
 struct organization_tlv {
 	Enumeration16 type;
@@ -173,6 +270,53 @@ static inline unsigned int path_length(struct path_trace_tlv *p)
 	return p->length / sizeof(struct ClockIdentity);
 }
 
+struct request_unicast_xmit_tlv {
+	Enumeration16   type;
+	UInteger16      length;
+	uint8_t         message_type;
+	Integer8        logInterMessagePeriod;
+	UInteger32      durationField;
+} PACKED;
+
+struct slave_delay_timing_record {
+	UInteger16          sequenceId;
+	struct Timestamp    delayOriginTimestamp;
+	TimeInterval        totalCorrectionField;
+	struct Timestamp    delayResponseTimestamp;
+} PACKED;
+
+struct slave_delay_timing_data_tlv {
+	Enumeration16        type;
+	UInteger16           length;
+	struct PortIdentity  sourcePortIdentity;
+	struct slave_delay_timing_record record[0];
+} PACKED;
+
+#define SLAVE_DELAY_TIMING_MAX \
+	((sizeof(struct message_data) - sizeof(struct signaling_msg) -	\
+	  sizeof(struct slave_delay_timing_data_tlv)) /		\
+	 sizeof(struct slave_delay_timing_record))
+
+struct slave_rx_sync_timing_record {
+	UInteger16          sequenceId;
+	struct Timestamp    syncOriginTimestamp;
+	TimeInterval        totalCorrectionField;
+	Integer32           scaledCumulativeRateOffset;
+	struct Timestamp    syncEventIngressTimestamp;
+} PACKED;
+
+struct slave_rx_sync_timing_data_tlv {
+	Enumeration16        type;
+	UInteger16           length;
+	struct PortIdentity  sourcePortIdentity;
+	struct slave_rx_sync_timing_record record[0];
+} PACKED;
+
+#define SLAVE_RX_SYNC_TIMING_MAX \
+	((sizeof(struct message_data) - sizeof(struct signaling_msg) -	\
+	  sizeof(struct slave_rx_sync_timing_data_tlv)) /		\
+	 sizeof(struct slave_rx_sync_timing_record))
+
 typedef struct Integer96 {
 	uint16_t nanoseconds_msb;
 	uint64_t nanoseconds_lsb;
@@ -190,6 +334,48 @@ struct follow_up_info_tlv {
 	Integer32     scaledLastGmPhaseChange;
 } PACKED;
 
+struct ieee_c37_238_2011_tlv {
+	Enumeration16 type;
+	UInteger16    length;
+	Octet         id[3];
+	Octet         subtype[3];
+	UInteger16    grandmasterID;
+	UInteger32    grandmasterTimeInaccuracy;
+	UInteger32    networkTimeInaccuracy;
+	Octet         pad[2];
+} PACKED;
+
+struct ieee_c37_238_2017_tlv {
+	Enumeration16 type;
+	UInteger16    length;
+	Octet         id[3];
+	Octet         subtype[3];
+	UInteger16    grandmasterID;
+	UInteger32    reserved1;
+	UInteger32    totalTimeInaccuracy;
+	Octet         pad[2];
+} PACKED;
+
+struct ieee_c37_238_settings_np {
+	Enumeration16 version;
+	UInteger16    grandmasterID;
+	UInteger32    grandmasterTimeInaccuracy;
+	UInteger32    networkTimeInaccuracy;
+	UInteger32    totalTimeInaccuracy;
+} PACKED;
+
+struct msg_interval_req_tlv {
+	Enumeration16 type;
+	UInteger16    length;
+	Octet         id[3];
+	Octet         subtype[3];
+	Integer8      linkDelayInterval;
+	Integer8      timeSyncInterval;
+	Integer8      announceInterval;
+	Octet         flags;
+	Octet         reserved[2];
+} PACKED;
+
 struct time_status_np {
 	int64_t       master_offset; /*nanoseconds*/
 	int64_t       ingress_time;  /*nanoseconds*/
@@ -200,78 +386,6 @@ struct time_status_np {
 	Integer32     gmPresent;
 	struct ClockIdentity gmIdentity;
 } PACKED;
-
-#ifdef KSZ_1588_PTP
-struct interval_info_tlv {
-	Enumeration16 type;
-	UInteger16    length;
-	Octet         id[3];
-	Octet         subtype[3];
-	int8_t	      linkDelayInterval;
-	int8_t	      timeSyncInterval;
-	int8_t	      announceInterval;
-	uint8_t	      flags;
-	uint16_t      reserved;
-} PACKED;
-
-struct wake_info_tlv {
-	Enumeration16 type;
-	UInteger16    length;
-	Octet         id[3];
-	Octet         subtype[3];
-	uint8_t	      event;
-} PACKED;
-
-struct ieee_c37_238_data {
-	UInteger16 grandmasterID;
-	UInteger32 grandmasterTimeInaccuracy;
-	UInteger32 networkTimeInaccuracy;
-	UInteger16 reserved;
-} PACKED;
-
-struct ieee_c37_238_info_tlv {
-	struct organization_tlv org;
-	struct ieee_c37_238_data data;
-} PACKED;
-
-struct ptp_second {
-	UInteger16 seconds_msb;
-	UInteger32 seconds_lsb;
-} PACKED;
-
-struct ptp_text {
-	UInteger8 lengthField;
-	UInteger8 textField[1];
-} PACKED;
-
-struct tlv_hdr {
-	Enumeration16 type;
-	UInteger16 length;
-} PACKED;
-
-struct alternate_time_offset_tlv {
-	struct tlv_hdr hdr;
-	UInteger8 keyField;
-	Integer32 currentOffset;
-	Integer32 jumpSeconds;
-	struct ptp_second timeOfNextJump;
-	struct ptp_text displayName;
-} PACKED;
-
-struct transparent_clock_default_data_set {
-	struct ClockIdentity clockIdentity;
-	UInteger16 numberPorts;
-	UInteger8 delayMechanism;
-	UInteger8 primaryDomain;
-} PACKED;
-
-struct transparent_clock_port_data_set {
-	struct PortIdentity portIdentity;
-	UInteger8 faultyFlag:1;
-	Integer8 logMinPdelayReqInterval;
-	TimeInterval peerMeanPathDelay;
-} PACKED;
-#endif
 
 struct grandmaster_settings_np {
 	struct ClockQuality clockQuality;
@@ -300,6 +414,28 @@ struct port_properties_np {
 	struct PTPText interface;
 } PACKED;
 
+struct port_hwclock_np {
+	struct PortIdentity portIdentity;
+	Integer32 phc_index;
+	UInteger8 flags;
+	uint8_t reserved;
+} PACKED;
+
+struct port_stats_np {
+	struct PortIdentity portIdentity;
+	struct PortStats stats;
+} PACKED;
+
+struct port_service_stats_np {
+	struct PortIdentity portIdentity;
+	struct PortServiceStats stats;
+} PACKED;
+
+struct unicast_master_table_np {
+	uint16_t actual_table_size;
+	struct unicast_master_entry unicast_masters[0];
+} PACKED;
+
 #define PROFILE_ID_LEN 6
 
 struct mgmt_clock_description {
@@ -315,19 +451,51 @@ struct mgmt_clock_description {
 };
 
 struct tlv_extra {
+	TAILQ_ENTRY(tlv_extra) list;
+	struct TLV *tlv;
 	union {
 		struct mgmt_clock_description cd;
+		struct nsm_resp_tlv_foot *foot;
 	};
 };
 
+/* Organizationally Unique Identifiers */
+#define ITU_T_COMMITTEE 0x00, 0x19, 0xA7
+extern uint8_t itu_t_id[3];
+
+struct msg_interface_rate_tlv {
+       Enumeration16 type;
+       UInteger16    length;
+       Octet         id[3];
+       Octet         subtype[3];
+       UInteger64    interfaceBitPeriod;
+       UInteger16    numberOfBitsBeforeTimestamp;
+       UInteger16    numberOfBitsAfterTimestamp;
+} PACKED;
+
+/**
+ * Allocates a new tlv_extra structure.
+ * @return  Pointer to a new structure on success or NULL otherwise.
+ */
+struct tlv_extra *tlv_extra_alloc(void);
+
+/**
+ * Release all of the memory in the tlv_extra cache.
+ */
+void tlv_extra_cleanup(void);
+
+/**
+ * Frees a tlv_extra structure.
+ * @param extra  Pointer to the structure to free.
+ */
+void tlv_extra_recycle(struct tlv_extra *extra);
+
 /**
  * Converts recognized value sub-fields into host byte order.
- * @param tlv Pointer to a Type Length Value field.
- * @param extra Additional struct where data from tlv will be saved,
- * can be NULL.
+ * @param extra  TLV descriptor pointing to the protocol data.
  * @return Zero if successful, otherwise non-zero
  */
-int tlv_post_recv(struct TLV *tlv, struct tlv_extra *extra);
+int tlv_post_recv(struct tlv_extra *extra);
 
 /**
  * Converts recognized value sub-fields into network byte order.

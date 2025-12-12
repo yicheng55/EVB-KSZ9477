@@ -55,6 +55,7 @@ struct dataset {
 	struct ClockIdentity identity;
 	struct ClockQuality  quality;
 	UInteger8            priority2;
+	UInteger8            localPriority; /* Telecom Profile only */
 	UInteger16           stepsRemoved;
 	struct PortIdentity  sender;
 	struct PortIdentity  receiver;
@@ -86,6 +87,7 @@ struct parent_ds {
 
 #define CURRENT_UTC_OFFSET  37 /* 1 Jan 2017 */
 #define INTERNAL_OSCILLATOR 0xA0
+#define CLOCK_CLASS_THRESHOLD_DEFAULT 248
 
 struct timePropertiesDS {
 	Integer16    currentUtcOffset;

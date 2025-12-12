@@ -62,12 +62,10 @@ static int mcast_bind(int fd, int index)
 	return 0;
 }
 
-static int mcast_join(int fd, int index, const struct sockaddr *grp,
-		      socklen_t grplen)
+static int mcast_join(int fd, int index, const struct sockaddr_in *sa)
 {
 	int err, off = 0;
 	struct ip_mreqn req;
-	struct sockaddr_in *sa = (struct sockaddr_in *) grp;
 
 	memset(&req, 0, sizeof(req));
 	memcpy(&req.imr_multiaddr, &sa->sin_addr, sizeof(struct in_addr));
@@ -87,9 +85,6 @@ static int mcast_join(int fd, int index, const struct sockaddr *grp,
 
 static int udp_close(struct transport *t, struct fdarray *fda)
 {
-#ifdef KSZ_1588_PTP
-	sk_timestamping_close(fda->fd[FD_EVENT], t->name, t->ts_type);
-#endif
 	close(fda->fd[0]);
 	close(fda->fd[1]);
 	return 0;
@@ -132,12 +127,12 @@ static int open_socket(const char *name, struct in_addr mc_addr[2], short port,
 		goto no_option;
 	}
 	addr.sin_addr = mc_addr[0];
-	if (mcast_join(fd, index, (struct sockaddr *) &addr, sizeof(addr))) {
+	if (mcast_join(fd, index, &addr)) {
 		pr_err("mcast_join failed");
 		goto no_option;
 	}
 	addr.sin_addr = mc_addr[1];
-	if (mcast_join(fd, index, (struct sockaddr *) &addr, sizeof(addr))) {
+	if (mcast_join(fd, index, &addr)) {
 		pr_err("mcast_join failed");
 		goto no_option;
 	}
@@ -155,10 +150,11 @@ enum { MC_PRIMARY, MC_PDELAY };
 
 static struct in_addr mcast_addr[2];
 
-static int udp_open(struct transport *t, const char *name, struct fdarray *fda,
-		    enum timestamp_type ts_type)
+static int udp_open(struct transport *t, struct interface *iface,
+		    struct fdarray *fda, enum timestamp_type ts_type)
 {
 	struct udp *udp = container_of(t, struct udp, t);
+	const char *name = interface_name(iface);
 	uint8_t event_dscp, general_dscp;
 	int efd, gfd, ttl;
 
@@ -183,7 +179,8 @@ static int udp_open(struct transport *t, const char *name, struct fdarray *fda,
 	if (gfd < 0)
 		goto no_general;
 
-	if (sk_timestamping_init(efd, name, ts_type, TRANS_UDP_IPV4))
+	if (sk_timestamping_init(efd, interface_label(iface), ts_type, TRANS_UDP_IPV4,
+				 interface_get_vclock(iface)))
 		goto no_timestamping;
 
 	if (sk_general_init(gfd))
@@ -192,10 +189,10 @@ static int udp_open(struct transport *t, const char *name, struct fdarray *fda,
 	event_dscp = config_get_int(t->cfg, NULL, "dscp_event");
 	general_dscp = config_get_int(t->cfg, NULL, "dscp_general");
 
-	if (event_dscp && sk_set_priority(efd, event_dscp)) {
+	if (event_dscp && sk_set_priority(efd, AF_INET, event_dscp)) {
 		pr_warning("Failed to set event DSCP priority.");
 	}
-	if (general_dscp && sk_set_priority(gfd, general_dscp)) {
+	if (general_dscp && sk_set_priority(gfd, AF_INET, general_dscp)) {
 		pr_warning("Failed to set general DSCP priority.");
 	}
 
@@ -214,32 +211,47 @@ no_event:
 static int udp_recv(struct transport *t, int fd, void *buf, int buflen,
 		    struct address *addr, struct hw_timestamp *hwts)
 {
-	return sk_receive(fd, buf, buflen, addr, hwts, 0);
+	return sk_receive(fd, buf, buflen, addr, hwts, MSG_DONTWAIT);
 }
 
 #ifdef KSZ_1588_PTP
-static int udp_recv_err(struct transport *t, int fd, void *buf, int buflen,
-			struct address *addr, struct hw_timestamp *hwts)
+#ifdef KSZ_1588_PTP_DELAYED_TX_TIMESTAMP
+static int udp_rerr(struct transport *t, int fd, void *buf, int buflen,
+		    struct address *addr, struct hw_timestamp *hwts)
 {
-	ssize_t cnt;
-	unsigned char junk[1600];
-
-	cnt = sk_receive(fd, junk, sizeof(junk), addr, hwts, MSG_ERRQUEUE);
-	if (buflen < cnt)
-		cnt = buflen;
-	memcpy(buf, junk, cnt);
-	return cnt;
+	return sk_receive(fd, buf, buflen, addr, hwts, MSG_ERRQUEUE);
 }
 #endif
 
-static int udp_send(struct transport *t, struct fdarray *fda, int event,
-		    int peer, void *buf, int len, struct address *addr,
-		    struct hw_timestamp *hwts)
+#ifdef KSZ_1588_PTP_HW
+static int udp_filt(struct transport *t, struct interface *iface, int fd,
+		    int rx_sync)
 {
-	ssize_t cnt;
-	int fd = event ? fda->fd[FD_EVENT] : fda->fd[FD_GENERAL];
+	return sk_timestamping_filt(fd, interface_label(iface), rx_sync);
+}
+#endif
+#endif
+
+static int udp_send(struct transport *t, struct fdarray *fda,
+		    enum transport_event event, int peer, void *buf, int len,
+		    struct address *addr, struct hw_timestamp *hwts)
+{
 	struct address addr_buf;
 	unsigned char junk[1600];
+	ssize_t cnt;
+	int fd = -1;
+
+	switch (event) {
+	case TRANS_GENERAL:
+		fd = fda->fd[FD_GENERAL];
+		break;
+	case TRANS_EVENT:
+	case TRANS_ONESTEP:
+	case TRANS_P2P1STEP:
+	case TRANS_DEFER_EVENT:
+		fd = fda->fd[FD_EVENT];
+		break;
+	}
 
 	if (!addr) {
 		memset(&addr_buf, 0, sizeof(addr_buf));
@@ -252,7 +264,6 @@ static int udp_send(struct transport *t, struct fdarray *fda, int event,
 
 	addr->sin.sin_port = htons(event ? EVENT_PORT : GENERAL_PORT);
 
-#ifndef KSZ_1588_PTP
 	/*
 	 * Extend the payload by two, for UDP checksum correction.
 	 * This is not really part of the standard, but it is the way
@@ -260,25 +271,16 @@ static int udp_send(struct transport *t, struct fdarray *fda, int event,
 	 */
 	if (event == TRANS_ONESTEP)
 		len += 2;
-#endif
 
 	cnt = sendto(fd, buf, len, 0, &addr->sa, sizeof(addr->sin));
 	if (cnt < 1) {
 		pr_err("sendto failed: %m");
-		return cnt;
+		return -errno;
 	}
-#ifdef KSZ_1588_PTP
-	if (hwts)
-		memset(&hwts->ts, 0, sizeof(hwts->ts));
-	if (event == TRANS_EVENT)
-		sk_receive(fd, junk, len, NULL, hwts, MSG_ERRQUEUE);
-	return cnt;
-#else
 	/*
 	 * Get the time stamp right away.
 	 */
 	return event == TRANS_EVENT ? sk_receive(fd, junk, len, NULL, hwts, MSG_ERRQUEUE) : cnt;
-#endif
 }
 
 static void udp_release(struct transport *t)
@@ -320,7 +322,12 @@ struct transport *udp_transport_create(void)
 	udp->t.open  = udp_open;
 	udp->t.recv  = udp_recv;
 #ifdef KSZ_1588_PTP
-	udp->t.recv_err = udp_recv_err;
+#ifdef KSZ_1588_PTP_DELAYED_TX_TIMESTAMP
+	udp->t.rerr  = udp_rerr;
+#endif
+#ifdef KSZ_1588_PTP_HW
+	udp->t.filt  = udp_filt;
+#endif
 #endif
 	udp->t.send  = udp_send;
 	udp->t.release = udp_release;

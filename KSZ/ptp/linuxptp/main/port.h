@@ -33,6 +33,9 @@ struct clock;
 /** Opaque type. */
 struct port;
 
+/** The port identity that matches any port. */
+extern const struct PortIdentity wildcard_pid;
+
 /**
  * Returns the dataset from a port's best foreign clock record, if any
  * has yet been discovered. This function does not bring the returned
@@ -83,23 +86,13 @@ void port_dispatch(struct port *p, enum fsm_event event, int mdiff);
 enum fsm_event port_event(struct port *port, int fd_index);
 
 #ifdef KSZ_1588_PTP
-int port_exit_ptp(struct clock *c);
-int port_init_ptp(struct port *p, int cap, int *drift, uint8_t *version,
-	uint8_t *ports, uint32_t *access_delay);
-int port_get_info(struct port *p);
+#ifdef KSZ_1588_PTP_DELAYED_PATH_DELAY
+Enumeration8 port_dm(struct port *port);
+#endif
 
+#ifdef KSZ_1588_PTP_DELAYED_TX_TIMESTAMP
 enum fsm_event port_tx_event(struct port *port, int fd_index);
-
-int new_state(struct port *p);
-void port_set_host_port(struct port *p, struct port *host_port);
-void port_set_port_state(struct port *p, enum fsm_event event);
-int port_update_peer_delay(struct port *p, int n);
-void port_update_grandmaster(struct port *p);
-int port_matched(struct port *p, int n);
-
-int port_is_aed(struct port *p);
-int port_is_aed_master(struct port *p);
-void process_wake_info(struct clock *c, struct port *p, int event);
+#endif
 #endif
 
 /**
@@ -114,7 +107,7 @@ int port_forward(struct port *p, struct ptp_message *msg);
  * Forward a message on a given port to the address stored in the message.
  * @param port    A pointer previously obtained via port_open().
  * @param msg     The message to send. Must be in network byte order.
- * @return        Zero on success, non-zero otherwise.
+ * @return        Zero on success, negative errno value otherwise.
  */
 int port_forward_to(struct port *p, struct ptp_message *msg);
 
@@ -125,10 +118,10 @@ int port_forward_to(struct port *p, struct ptp_message *msg);
  * port_forward if you need to send single message to several ports.
  * @param p        A pointer previously obtained via port_open().
  * @param msg      The message to send.
- * @param event    0 if the message is a general message, 1 if it is an
- *                 event message.
+ * @param event    One of the @ref transport_event enumeration values.
  */
-int port_prepare_and_send(struct port *p, struct ptp_message *msg, int event);
+int port_prepare_and_send(struct port *p, struct ptp_message *msg,
+			  enum transport_event event);
 
 /**
  * Obtain a port's identity.
@@ -145,18 +138,18 @@ struct PortIdentity port_identity(struct port *p);
 int port_number(struct port *p);
 
 /**
+ * Obtain a port's name for logging purposes.
+ * @param p        A port instance.
+ * @return         Loggable name of 'p'.
+ */
+const char *port_log_name(struct port *p);
+
+/**
  * Obtain the link status of a port.
  * @param p        A port instance.
  * @return         One (1) if the link is up, zero otherwise.
  */
 int port_link_status_get(struct port *p);
-
-/**
- * Sets the link status for a port.
- * @param p        A port instance.
- * @param up       Pass one (1) if the link is up and zero if down.
- */
-void port_link_status_set(struct port *p, int up);
 
 /**
  * Manage a port according to a given message.
@@ -219,6 +212,7 @@ void port_notify_event(struct port *p, enum notification event);
 
 /**
  * Open a network port.
+ * @param phc_device    The name of PHC device as found on the command line.
  * @param phc_index     The PHC device index for the network device.
  * @param timestamping  The timestamping mode for this port.
  * @param number	An arbitrary number assigned to this port.
@@ -226,11 +220,15 @@ void port_notify_event(struct port *p, enum notification event);
  * @param clock         A pointer to the system PTP clock.
  * @return A pointer to an open port on success, or NULL otherwise.
  */
-struct port *port_open(int phc_index,
+struct port *port_open(const char *phc_device,
+		       int phc_index,
 		       enum timestamp_type timestamping,
 		       int number,
 		       struct interface *interface,
 		       struct clock *clock);
+
+struct ptp_message *port_signaling_construct(struct port *p,
+					     const struct PortIdentity *tpid);
 
 /**
  * Returns a port's current state.
@@ -238,6 +236,22 @@ struct port *port_open(int phc_index,
  * @return      One of the @ref port_state values.
  */
 enum port_state port_state(struct port *port);
+
+/**
+ * Return  port's delay mechanism method.
+ * @param port	A port instance.
+ * @return 	one of the @ref delay_mechanism values.
+ */
+enum delay_mechanism port_delay_mechanism(struct port *port);
+
+/**
+ * Update a port's current state based on a given event.
+ * @param p        A pointer previously obtained via port_open().
+ * @param event    One of the @a fsm_event codes.
+ * @param mdiff    Whether a new master has been selected.
+ * @return         One (1) if the port state has changed, zero otherwise.
+ */
+int port_state_update(struct port *p, enum fsm_event event, int mdiff);
 
 /**
  * Return array of file descriptors for this port. The fault fd is not
@@ -339,5 +353,25 @@ enum fault_type last_fault_type(struct port *port);
  */
 void fault_interval(struct port *port, enum fault_type ft,
 		    struct fault_interval *i);
+
+/**
+ * Obtain the BMCA type of the port.
+ *
+ * @param port        A port instance.
+ * @return            bmca type.
+ */
+enum bmca_select port_bmca(struct port *p);
+
+/**
+ * Release all of the memory in the TC transmit descriptor cache.
+ */
+void tc_cleanup(void);
+
+/**
+ * Update port's unicast state if port's unicast_state_dirty is true.
+ *
+ * @param port  A port instance.
+ */
+void port_update_unicast_state(struct port *p);
 
 #endif

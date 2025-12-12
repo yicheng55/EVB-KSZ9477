@@ -16,14 +16,15 @@
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
-#include <stdio.h>
-#include <sys/ioctl.h>
-#include <sys/types.h>
-#include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
-#include <unistd.h>
-
 #include <linux/ptp_clock.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "phc.h"
 
@@ -38,18 +39,26 @@
 
 static int phc_get_caps(clockid_t clkid, struct ptp_clock_caps *caps);
 
-clockid_t phc_open(char *phc)
+clockid_t phc_open(const char *phc)
 {
 	clockid_t clkid;
-	struct ptp_clock_caps caps;
-	int fd = open(phc, O_RDWR);
+	struct timespec ts;
+	struct timex tx;
+	int fd;
 
+	memset(&tx, 0, sizeof(tx));
+
+	fd = open(phc, O_RDWR);
 	if (fd < 0)
 		return CLOCK_INVALID;
 
 	clkid = FD_TO_CLOCKID(fd);
 	/* check if clkid is valid */
-	if (phc_get_caps(clkid, &caps)) {
+	if (clock_gettime(clkid, &ts)) {
+		close(fd);
+		return CLOCK_INVALID;
+	}
+	if (clock_adjtime(clkid, &tx)) {
 		close(fd);
 		return CLOCK_INVALID;
 	}
@@ -91,6 +100,25 @@ int phc_max_adj(clockid_t clkid)
 	return max;
 }
 
+int phc_number_pins(clockid_t clkid)
+{
+	struct ptp_clock_caps caps;
+
+	if (phc_get_caps(clkid, &caps)) {
+		return 0;
+	}
+	return caps.n_pins;
+}
+
+int phc_pin_setfunc(clockid_t clkid, struct ptp_pin_desc *desc)
+{
+	int err = ioctl(CLOCKID_TO_FD(clkid), PTP_PIN_SETFUNC2, desc);
+	if (err) {
+		fprintf(stderr, PTP_PIN_SETFUNC_FAILED "\n");
+	}
+	return err;
+}
+
 int phc_has_pps(clockid_t clkid)
 {
 	struct ptp_clock_caps caps;
@@ -98,4 +126,14 @@ int phc_has_pps(clockid_t clkid)
 	if (phc_get_caps(clkid, &caps))
 		return 0;
 	return caps.pps;
+}
+
+int phc_has_writephase(clockid_t clkid)
+{
+	struct ptp_clock_caps caps;
+
+	if (phc_get_caps(clkid, &caps)) {
+		return 0;
+	}
+	return caps.adjust_phase;
 }

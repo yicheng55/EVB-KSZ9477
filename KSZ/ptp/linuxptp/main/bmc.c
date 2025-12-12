@@ -21,12 +21,18 @@
 #include "bmc.h"
 #include "ds.h"
 
-#define A_BETTER_TOPO  2
-#define A_BETTER       1
-#define B_BETTER      -1
-#define B_BETTER_TOPO -2
+static int portid_cmp(struct PortIdentity *a, struct PortIdentity *b)
+{
+	int diff = memcmp(&a->clockIdentity, &b->clockIdentity, sizeof(a->clockIdentity));
 
-static int dscmp2(struct dataset *a, struct dataset *b)
+	if (diff == 0) {
+		diff = a->portNumber - b->portNumber;
+	}
+
+	return diff;
+}
+
+int dscmp2(struct dataset *a, struct dataset *b)
 {
 	int diff;
 	unsigned int A = a->stepsRemoved, B = b->stepsRemoved;
@@ -40,7 +46,7 @@ static int dscmp2(struct dataset *a, struct dataset *b)
 	 * standard, since there is nothing we can do about it anyway.
 	 */
 	if (A < B) {
-		diff = memcmp(&b->receiver, &b->sender, sizeof(b->receiver));
+		diff = portid_cmp(&b->receiver, &b->sender);
 		if (diff < 0)
 			return A_BETTER;
 		if (diff > 0)
@@ -49,7 +55,7 @@ static int dscmp2(struct dataset *a, struct dataset *b)
 		return 0;
 	}
 	if (A > B) {
-		diff = memcmp(&a->receiver, &a->sender, sizeof(a->receiver));
+		diff = portid_cmp(&a->receiver, &a->sender);
 		if (diff < 0)
 			return B_BETTER;
 		if (diff > 0)
@@ -58,7 +64,7 @@ static int dscmp2(struct dataset *a, struct dataset *b)
 		return 0;
 	}
 
-	diff = memcmp(&a->sender, &b->sender, sizeof(a->sender));
+	diff = portid_cmp(&a->sender, &b->sender);
 	if (diff < 0)
 		return A_BETTER_TOPO;
 	if (diff > 0)
@@ -120,7 +126,8 @@ int dscmp(struct dataset *a, struct dataset *b)
 	return diff < 0 ? A_BETTER : B_BETTER;
 }
 
-enum port_state bmc_state_decision(struct clock *c, struct port *r)
+enum port_state bmc_state_decision(struct clock *c, struct port *r,
+				   int (*compare)(struct dataset *a, struct dataset *b))
 {
 	struct dataset *clock_ds, *clock_best, *port_best;
 	enum port_state ps;
@@ -130,18 +137,29 @@ enum port_state bmc_state_decision(struct clock *c, struct port *r)
 	port_best = port_best_foreign(r);
 	ps = port_state(r);
 
-	if (!port_best && (PS_LISTENING == ps || PS_FAULTY == ps))
+	/*
+	 * This scenario is particularly important in the designated_slave_fsm
+	 * when it is in PS_SLAVE state. In this scenario, there is no other
+	 * foreign master and it will elect itself as master ultimately
+	 * resulting in printing out some unnecessary warnings (see
+	 * port_slave_priority_warning()).
+	 */
+	if (!port_best && port_bmca(r) == BMCA_NOOP) {
+		return ps;
+	}
+
+	if (!port_best && PS_LISTENING == ps)
 		return ps;
 
 	if (clock_class(c) <= 127) {
-		if (dscmp(clock_ds, port_best) > 0) {
+		if (compare(clock_ds, port_best) > 0) {
 			return PS_GRAND_MASTER; /*M1*/
 		} else {
 			return PS_PASSIVE; /*P1*/
 		}
 	}
 
-	if (dscmp(clock_ds, clock_best) > 0) {
+	if (compare(clock_ds, clock_best) > 0) {
 		return PS_GRAND_MASTER; /*M2*/
 	}
 
@@ -149,7 +167,7 @@ enum port_state bmc_state_decision(struct clock *c, struct port *r)
 		return PS_SLAVE; /*S1*/
 	}
 
-	if (dscmp(clock_best, port_best) == A_BETTER_TOPO) {
+	if (compare(clock_best, port_best) == A_BETTER_TOPO) {
 		return PS_PASSIVE; /*P2*/
 	} else {
 		return PS_MASTER; /*M3*/

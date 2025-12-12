@@ -20,8 +20,19 @@
 #ifndef HAVE_SK_H
 #define HAVE_SK_H
 
+#include <stdbool.h>
 #include "address.h"
 #include "transport.h"
+
+/**
+ * Defines the available Hardware time-stamp setting modes.
+ */
+
+enum hwts_filter_mode {
+	HWTS_FILTER_NORMAL,    /* set hardware filters in normal way */
+	HWTS_FILTER_CHECK,     /* check filters but do not change them */
+	HWTS_FILTER_FULL,      /* Use time-stamp on all received packets */
+};
 
 /**
  * Contains timestamping information returned by the GET_TS_INFO ioctl.
@@ -37,6 +48,18 @@ struct sk_ts_info {
 	unsigned int so_timestamping;
 	unsigned int tx_types;
 	unsigned int rx_filters;
+};
+
+/**
+ * Contains interface information returned by the GLINKSETTINGS ioctl.
+ * @valid:            set to non-zero when the info struct contains valid data.
+ * @speed:            interface speed.
+ * @iface_bit_period  interface bit period in attoseconds per bit.
+ */
+struct sk_if_info {
+	bool valid;
+	uint32_t speed;
+	uint64_t iface_bit_period;
 };
 
 /**
@@ -67,6 +90,14 @@ int sk_general_init(int fd);
  * @return          zero on success, negative on failure.
  */
 int sk_get_ts_info(const char *name, struct sk_ts_info *sk_info);
+
+/**
+ * Obtain supporte interface information
+ * @param name     The name of the interface
+ * @param info      Struct containing obtained interface information.
+ * @return          zero on success, negative on failure.
+ */
+int sk_get_if_info(const char *name, struct sk_if_info *sk_info);
 
 /**
  * Obtain the MAC address of a network interface.
@@ -100,15 +131,24 @@ int sk_receive(int fd, void *buf, int buflen,
 	       struct address *addr, struct hw_timestamp *hwts, int flags);
 
 /**
+ * Get and clear a pending socket error.
+ * @param fd      An open socket.
+ * @return        The error.
+ */
+int sk_get_error(int fd);
+
+/**
  * Set DSCP value for socket.
- * @param fd    An open socket.
- * @param dscp  The desired DSCP code.
+ * @param fd     An open socket.
+ * @param family The address family in use: AF_INET or AF_INET6
+ * @param dscp   The desired DSCP code.
  * @return Zero on success, negative on failure
  */
-int sk_set_priority(int fd, uint8_t dscp);
+int sk_set_priority(int fd, int family, uint8_t dscp);
 
 #ifdef KSZ_1588_PTP
-int sk_timestamping_close(int fd, const char *device, enum timestamp_type type);
+int sk_timestamping_close(int fd, const char *device);
+int sk_timestamping_filt(int fd, const char *device, int rx_sync);
 #endif
 
 /**
@@ -117,10 +157,11 @@ int sk_timestamping_close(int fd, const char *device, enum timestamp_type type);
  * @param device      The name of the network interface to configure.
  * @param type        The requested flavor of time stamping.
  * @param transport   The type of transport used.
+ * @param vclock      Index of the virtual PHC, or -1 for the physical clock.
  * @return            Zero on success, non-zero otherwise.
  */
 int sk_timestamping_init(int fd, const char *device, enum timestamp_type type,
-			 enum transport_type transport);
+			 enum transport_type transport, int vclock);
 
 /**
  * Limits the time that RECVMSG(2) will poll while waiting for the tx timestamp
@@ -134,5 +175,10 @@ extern int sk_tx_timeout;
  * follow up messages using their network stack receipt time stamps.
  */
 extern int sk_check_fupsync;
+
+/**
+ * Hardware time-stamp setting mode
+ */
+extern enum hwts_filter_mode sk_hwts_filter_mode;
 
 #endif

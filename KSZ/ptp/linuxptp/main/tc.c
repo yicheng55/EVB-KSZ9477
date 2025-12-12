@@ -61,7 +61,6 @@ static int tc_blocked(struct port *q, struct port *p, struct ptp_message *m)
 	if (portnum(p) == 0) {
 		return 1;
 	}
-#if 0
 	if (!q->tc_spanning_tree) {
 		return 0;
 	}
@@ -69,7 +68,6 @@ static int tc_blocked(struct port *q, struct port *p, struct ptp_message *m)
 	if (m->header.domainNumber != clock_domain_number(p->clock)) {
 		return 0;
 	}
-#endif
 	/* Ingress state */
 	s = port_state(q);
 	switch (s) {
@@ -116,8 +114,6 @@ static int tc_blocked(struct port *q, struct port *p, struct ptp_message *m)
 		}
 		break;
 	}
-	if (!port_capable(p))
-		return 1;
 	return 0;
 }
 
@@ -130,8 +126,8 @@ static void tc_complete_request(struct port *q, struct port *p,
 		return;
 	}
 #ifdef DEBUG
-	pr_err("stash delay request from port %hd to %hd seqid %hu residence %lu",
-	       portnum(q), portnum(p), ntohs(req->header.sequenceId),
+	pr_err("stash delay request from %s to %s seqid %hu residence %lu",
+	       q->log_name, p->log_name, ntohs(req->header.sequenceId),
 	       (unsigned long) tmv_to_nanoseconds(residence));
 #endif
 	msg_get(req);
@@ -150,8 +146,8 @@ static void tc_complete_response(struct port *q, struct port *p,
 	int cnt;
 
 #ifdef DEBUG
-	pr_err("complete delay response from port %hd to %hd seqid %hu",
-	       portnum(q), portnum(p), ntohs(resp->header.sequenceId));
+	pr_err("complete delay response from %s to %s seqid %hu",
+	       q->log_name, p->log_name, ntohs(resp->header.sequenceId));
 #endif
 	TAILQ_FOREACH(txd, &q->tc_transmitted, list) {
 		type = tc_match_delay(portnum(p), resp, txd);
@@ -168,7 +164,7 @@ static void tc_complete_response(struct port *q, struct port *p,
 	resp->header.correction = host2net64(c2);
 	cnt = transport_send(p->trp, &p->fda, TRANS_GENERAL, resp);
 	if (cnt <= 0) {
-		pr_err("tc failed to forward response on port %d", portnum(p));
+		pr_err("tc failed to forward response on %s", p->log_name);
 		port_dispatch(p, EV_FAULT_DETECTED, 0);
 	}
 	/* Restore original correction value for next egress port. */
@@ -229,7 +225,7 @@ static void tc_complete_syfup(struct port *q, struct port *p,
 	fup->header.correction = host2net64(c2);
 	cnt = transport_send(p->trp, &p->fda, TRANS_GENERAL, fup);
 	if (cnt <= 0) {
-		pr_err("tc failed to forward follow up on port %d", portnum(p));
+		pr_err("tc failed to forward follow up on %s", p->log_name);
 		port_dispatch(p, EV_FAULT_DETECTED, 0);
 	}
 	/* Restore original correction value for next egress port. */
@@ -269,110 +265,46 @@ static int tc_current(struct ptp_message *m, struct timespec now)
 
 static int tc_fwd_event(struct port *q, struct ptp_message *msg)
 {
-	tmv_t egress, ingress = timespec_to_tmv(msg->hwts.ts), residence;
+	tmv_t egress, ingress = msg->hwts.ts, residence;
 	struct port *p;
 	int cnt, err;
 	double rr;
-#ifdef KSZ_1588_PTP
-	tmv_t now;
-#endif
-	struct ptp_message *org = msg;
 
 	clock_gettime(CLOCK_MONOTONIC, &msg->ts.host);
-#ifdef KSZ_1588_PTP
-	now = timespec_to_tmv(msg->ts.host);
-#endif
 
 	/* First send the event message out. */
 	for (p = clock_first_port(q->clock); p; p = LIST_NEXT(p, list)) {
-		msg = org;
 		if (tc_blocked(q, p, msg)) {
 			continue;
 		}
-#ifdef KSZ_1588_PTP
-		if (port_is_ieee8021as(p)) {
-			if (!p->tx_ann && !p->no_asCapable)
-				continue;
-			p->fwd_sync = 1;
-			if (p->syncTxContTimeout < p->actual_sync_interval)
-				p->syncTxContTimeout = p->actual_sync_interval;
-			port_set_sync_cont_tmo(p);
-		}
-		if (msg_type(msg) == SYNC) {
-			++p->sync_cnt;
-			p->sync_cnt &= p->sync_max;
-			if (p->sync_cnt)
-				continue;
-		}
-		if (port_is_ieee8021as(p)) {
-			struct ptp_header *hdr;
-
-			if (now > p->last_tx_sync_tmv &&
-			    now - p->last_tx_sync_tmv < 20000000ULL) {
-				p->skip_tx_sync = 1;
-				continue;
-			}
-			msg = msg_duplicate(org, q->msg_cnt);
-			if (!msg)
-				break;
-			p->fwd = msg;
-			hdr = &msg->header;
-			hdr->sourcePortIdentity = p->portIdentity;
-			hdr->sourcePortIdentity.portNumber =
-				htons(hdr->sourcePortIdentity.portNumber);
-			hdr->sequenceId = htons(p->seqnum.sync++);
-			if (p->sync_max)
-				hdr->logMessageInterval = p->logSyncInterval;
-			p->sync_tx++;
-		}
-#endif
 		cnt = transport_send(p->trp, &p->fda, TRANS_DEFER_EVENT, msg);
 		if (cnt <= 0) {
-			pr_err("failed to forward event from port %hd to %hd",
-				portnum(q), portnum(p));
+			pr_err("failed to forward event from %s to %s",
+				q->log_name, p->log_name);
 			port_dispatch(p, EV_FAULT_DETECTED, 0);
 		}
 	}
 
 	/* Go back and gather the transmit time stamps. */
 	for (p = clock_first_port(q->clock); p; p = LIST_NEXT(p, list)) {
-		msg = org;
 		if (tc_blocked(q, p, msg)) {
 			continue;
 		}
-#ifdef KSZ_1588_PTP
-		if (port_is_ieee8021as(p)) {
-			msg = p->fwd;
-			if (!msg)
-				continue;
-		}
-#endif
-		err = transport_txts(p->trp, &p->fda, msg);
+		err = transport_txts(&p->fda, msg);
 		if (err || !msg_sots_valid(msg)) {
-			pr_err("failed to fetch txts on port %hd to %hd event",
-				portnum(q), portnum(p));
-#if 0
+			pr_err("failed to fetch txts on %s to %s event",
+				q->log_name, p->log_name);
 			port_dispatch(p, EV_FAULT_DETECTED, 0);
-#endif
-#ifdef KSZ_1588_PTP
-			p->tx_err = 1;
-#endif
 			continue;
 		}
 		ts_add(&msg->hwts.ts, p->tx_timestamp_offset);
-		egress = timespec_to_tmv(msg->hwts.ts);
+		egress = msg->hwts.ts;
 		residence = tmv_sub(egress, ingress);
 		rr = clock_rate_ratio(q->clock);
 		if (rr != 1.0) {
 			residence = dbl_tmv(tmv_dbl(residence) * rr);
 		}
 		tc_complete(q, p, msg, residence);
-#ifdef KSZ_1588_PTP
-		if (port_is_ieee8021as(p)) {
-			msg_put(msg);
-			p->fwd = NULL;
-		}
-#endif
 	}
 
 	return 0;
@@ -455,40 +387,18 @@ int tc_forward(struct port *q, struct ptp_message *msg)
 	int cnt;
 
 	if (q->tc_spanning_tree && msg_type(msg) == ANNOUNCE) {
-		struct parent_ds *dad = clock_parent_ds(q->clock);
-		int pdulen = sizeof(struct announce_msg);
-
 		steps_removed = ntohs(msg->announce.stepsRemoved);
 		msg->announce.stepsRemoved = htons(1 + steps_removed);
-		if (q->path_trace_enabled) {
-			struct TLV *tlv = (struct TLV *)msg->announce.suffix;
-
-			pdulen += path_trace_append(q, msg, dad);
-			msg->header.messageLength = htons(pdulen);
-			tlv->type = htons(tlv->type);
-			tlv->length = htons(tlv->length);
-		}
 	}
 
 	for (p = clock_first_port(q->clock); p; p = LIST_NEXT(p, list)) {
 		if (tc_blocked(q, p, msg)) {
 			continue;
 		}
-#ifdef KSZ_1588_PTP
-		if (port_is_ieee8021as(p)) {
-			struct ptp_header *hdr = &msg->header;
-
-			hdr->sourcePortIdentity = p->portIdentity;
-			hdr->sourcePortIdentity.portNumber =
-				htons(hdr->sourcePortIdentity.portNumber);
-			hdr->sequenceId = htons(p->seqnum.announce++);
-			p->tx_ann = 1;
-		}
-#endif
 		cnt = transport_send(p->trp, &p->fda, TRANS_GENERAL, msg);
 		if (cnt <= 0) {
-			pr_err("tc failed to forward message on port %d",
-			       portnum(p));
+			pr_err("tc failed to forward message on %s",
+			       p->log_name);
 			port_dispatch(p, EV_FAULT_DETECTED, 0);
 		}
 	}
@@ -498,44 +408,14 @@ int tc_forward(struct port *q, struct ptp_message *msg)
 int tc_fwd_folup(struct port *q, struct ptp_message *msg)
 {
 	struct port *p;
-	struct ptp_message *org = msg;
 
 	clock_gettime(CLOCK_MONOTONIC, &msg->ts.host);
 
 	for (p = clock_first_port(q->clock); p; p = LIST_NEXT(p, list)) {
-		msg = org;
 		if (tc_blocked(q, p, msg)) {
 			continue;
 		}
-#ifdef KSZ_1588_PTP
-		if (p->sync_cnt || p->skip_tx_sync) {
-			p->skip_tx_sync = 0;
-			continue;
-		}
-		if (port_is_ieee8021as(p)) {
-			struct ptp_header *hdr;
-
-			if (!p->tx_ann && !p->no_asCapable)
-				continue;
-			msg = msg_duplicate(org, q->msg_cnt);
-			if (!msg)
-				break;
-			hdr = &msg->header;
-			hdr->sourcePortIdentity = p->portIdentity;
-			hdr->sourcePortIdentity.portNumber =
-				htons(hdr->sourcePortIdentity.portNumber);
-			hdr->sequenceId = htons(p->seqnum.sync - 1);
-			if (p->sync_max)
-				hdr->logMessageInterval = p->logSyncInterval;
-			p->fup_tx++;
-		}
-#endif
 		tc_complete(q, p, msg, tmv_zero());
-#ifdef KSZ_1588_PTP
-		if (port_is_ieee8021as(p)) {
-			msg_put(msg);
-		}
-#endif
 	}
 	return 0;
 }
@@ -572,16 +452,12 @@ int tc_fwd_sync(struct port *q, struct ptp_message *msg)
 		}
 		fup->header.tsmt               = FOLLOW_UP | (msg->header.tsmt & 0xf0);
 		fup->header.ver                = msg->header.ver;
-		fup->header.messageLength      = sizeof(struct follow_up_msg);
+		fup->header.messageLength      = htons(sizeof(struct follow_up_msg));
 		fup->header.domainNumber       = msg->header.domainNumber;
 		fup->header.sourcePortIdentity = msg->header.sourcePortIdentity;
 		fup->header.sequenceId         = msg->header.sequenceId;
-		fup->header.control            = CTL_FOLLOW_UP;
 		fup->header.logMessageInterval = msg->header.logMessageInterval;
 		fup->follow_up.preciseOriginTimestamp = msg->sync.originTimestamp;
-		fup->header.flagField[0] = msg->header.flagField[0];
-		fup->header.flagField[1] = msg->header.flagField[1];
-		fup->header.messageLength = htons(fup->header.messageLength);
 		msg->header.flagField[0]      |= TWO_STEP;
 	}
 	err = tc_fwd_event(q, msg);
@@ -613,7 +489,7 @@ int tc_ignore(struct port *p, struct ptp_message *m)
 	c1 = clock_identity(p->clock);
 	c2 = m->header.sourcePortIdentity.clockIdentity;
 
-	if (0 == memcmp(&c1, &c2, sizeof(c1))) {
+	if (cid_eq(&c1, &c2)) {
 		return 1;
 	}
 	return 0;

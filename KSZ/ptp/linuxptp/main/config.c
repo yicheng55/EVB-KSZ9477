@@ -19,17 +19,32 @@
 #include <ctype.h>
 #include <float.h>
 #include <limits.h>
+#include <linux/ptp_clock.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+
+#include "as_capable.h"
+#include "bmc.h"
+#include "clock.h"
 #include "config.h"
 #include "ether.h"
 #include "hash.h"
+#include "power_profile.h"
 #include "print.h"
 #include "util.h"
 
+#define UDS_FILEMODE (S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP) /*0660*/
+#define UDS_RO_FILEMODE (UDS_FILEMODE|S_IROTH|S_IWOTH) /*0666*/
+
+struct interface {
+	STAILQ_ENTRY(interface) list;
+};
+
 enum config_section {
 	GLOBAL_SECTION,
+	UC_MTAB_SECTION,
 	PORT_SECTION,
 	UNKNOWN_SECTION,
 };
@@ -52,7 +67,7 @@ typedef union {
 	char *s;
 } any_t;
 
-#define CONFIG_LABEL_SIZE 32
+#define CONFIG_LABEL_SIZE 64
 
 #define CFG_ITEM_STATIC (1 << 0) /* statically allocated, not to be freed */
 #define CFG_ITEM_LOCKED (1 << 1) /* command line value, may not be changed */
@@ -130,6 +145,21 @@ static struct config_enum clock_servo_enu[] = {
 	{ "linreg", CLOCK_SERVO_LINREG },
 	{ "ntpshm", CLOCK_SERVO_NTPSHM },
 	{ "nullf",  CLOCK_SERVO_NULLF  },
+	{ "refclock_sock", CLOCK_SERVO_REFCLOCK_SOCK },
+	{ NULL, 0 },
+};
+
+static struct config_enum clock_type_enu[] = {
+	{ "OC",      CLOCK_TYPE_ORDINARY },
+	{ "BC",      CLOCK_TYPE_BOUNDARY },
+	{ "P2P_TC",  CLOCK_TYPE_P2P      },
+	{ "E2E_TC",  CLOCK_TYPE_E2E      },
+	{ NULL, 0 },
+};
+
+static struct config_enum dataset_comp_enu[] = {
+	{ "ieee1588", DS_CMP_IEEE1588 },
+	{ "G.8275.x", DS_CMP_G8275    },
 	{ NULL, 0 },
 };
 
@@ -143,9 +173,28 @@ static struct config_enum delay_mech_enu[] = {
 	{ "Auto", DM_AUTO },
 	{ "E2E",  DM_E2E },
 	{ "P2P",  DM_P2P },
-#ifdef KSZ_1588_PTP
-	{ "None", DM_NONE },
-#endif
+	{ "NONE", DM_NO_MECHANISM },
+	{ NULL, 0 },
+};
+
+static struct config_enum extts_polarity_enu[] = {
+	{ "rising",  PTP_RISING_EDGE  },
+	{ "falling", PTP_FALLING_EDGE },
+	{ "both",    PTP_RISING_EDGE | PTP_FALLING_EDGE },
+	{ NULL, 0 },
+};
+
+static struct config_enum hwts_filter_enu[] = {
+	{ "normal",  HWTS_FILTER_NORMAL  },
+	{ "check",   HWTS_FILTER_CHECK   },
+	{ "full",    HWTS_FILTER_FULL    },
+	{ NULL, 0 },
+};
+
+static struct config_enum ieee_c37_238_enu[] = {
+	{ "none", IEEE_C37_238_VERSION_NONE },
+	{ "2011", IEEE_C37_238_VERSION_2011 },
+	{ "2017", IEEE_C37_238_VERSION_2017 },
 	{ NULL, 0 },
 };
 
@@ -160,6 +209,8 @@ static struct config_enum timestamping_enu[] = {
 	{ "hardware", TS_HARDWARE  },
 	{ "software", TS_SOFTWARE  },
 	{ "legacy",   TS_LEGACY_HW },
+	{ "onestep",  TS_ONESTEP   },
+	{ "p2p1step", TS_P2P1STEP  },
 	{ NULL, 0 },
 };
 
@@ -171,52 +222,84 @@ static struct config_enum tsproc_enu[] = {
 	{ NULL, 0 },
 };
 
+static struct config_enum as_capable_enu[] = {
+	{ "true", AS_CAPABLE_TRUE },
+	{ "auto", AS_CAPABLE_AUTO },
+	{ NULL, 0 },
+};
+
+static struct config_enum bmca_enu[] = {
+	{ "ptp",  BMCA_PTP  },
+	{ "noop", BMCA_NOOP },
+	{ NULL, 0 },
+};
+
 struct config_item config_tab[] = {
 	PORT_ITEM_INT("announceReceiptTimeout", 3, 2, UINT8_MAX),
+	PORT_ITEM_ENU("asCapable", AS_CAPABLE_AUTO, as_capable_enu),
 	GLOB_ITEM_INT("assume_two_step", 0, 0, 1),
 	PORT_ITEM_INT("boundary_clock_jbod", 0, 0, 1),
+	PORT_ITEM_ENU("BMCA", BMCA_PTP, bmca_enu),
 	GLOB_ITEM_INT("check_fup_sync", 0, 0, 1),
+	GLOB_ITEM_INT("clientOnly", 0, 0, 1),
 	GLOB_ITEM_INT("clockAccuracy", 0xfe, 0, UINT8_MAX),
 	GLOB_ITEM_INT("clockClass", 248, 0, UINT8_MAX),
+	GLOB_ITEM_STR("clockIdentity", "000000.0000.000000"),
+	GLOB_ITEM_INT("clock_class_threshold", CLOCK_CLASS_THRESHOLD_DEFAULT, 6, CLOCK_CLASS_THRESHOLD_DEFAULT),
 	GLOB_ITEM_ENU("clock_servo", CLOCK_SERVO_PI, clock_servo_enu),
+	GLOB_ITEM_ENU("clock_type", CLOCK_TYPE_ORDINARY, clock_type_enu),
+	GLOB_ITEM_ENU("dataset_comparison", DS_CMP_IEEE1588, dataset_comp_enu),
 	PORT_ITEM_INT("delayAsymmetry", 0, INT_MIN, INT_MAX),
 	PORT_ITEM_ENU("delay_filter", FILTER_MOVING_MEDIAN, delay_filter_enu),
 	PORT_ITEM_INT("delay_filter_length", 10, 1, INT_MAX),
 	PORT_ITEM_ENU("delay_mechanism", DM_E2E, delay_mech_enu),
+	PORT_ITEM_INT("delay_response_timeout", 0, 0, UINT8_MAX),
 	GLOB_ITEM_INT("dscp_event", 0, 0, 63),
 	GLOB_ITEM_INT("dscp_general", 0, 0, 63),
-	GLOB_ITEM_INT("domainNumber", 0, 0, 127),
+	GLOB_ITEM_INT("domainNumber", 0, 0, 255),
 	PORT_ITEM_INT("egressLatency", 0, INT_MIN, INT_MAX),
 	PORT_ITEM_INT("fault_badpeernet_interval", 16, INT32_MIN, INT32_MAX),
 	PORT_ITEM_INT("fault_reset_interval", 4, INT8_MIN, INT8_MAX),
-#ifdef KSZ_1588_PTP
-	GLOB_ITEM_DBL("first_step_threshold", 0.00005, 0.0, DBL_MAX),
-	GLOB_ITEM_INT("use_one_step", 0, 0, 1),
-	GLOB_ITEM_INT("use_2_step_pdelay", 0, 0, 1),
-#else
 	GLOB_ITEM_DBL("first_step_threshold", 0.00002, 0.0, DBL_MAX),
-#endif
 	PORT_ITEM_INT("follow_up_info", 0, 0, 1),
 	GLOB_ITEM_INT("free_running", 0, 0, 1),
-	PORT_ITEM_INT("freq_est_interval", 1, 0, INT_MAX),
+	PORT_ITEM_INT("freq_est_interval", 1, INT_MIN, INT_MAX),
+	GLOB_ITEM_INT("G.8275.defaultDS.localPriority", 128, 1, UINT8_MAX),
+	PORT_ITEM_INT("G.8275.portDS.localPriority", 128, 1, UINT8_MAX),
 	GLOB_ITEM_INT("gmCapable", 1, 0, 1),
+	GLOB_ITEM_ENU("hwts_filter", HWTS_FILTER_NORMAL, hwts_filter_enu),
 	PORT_ITEM_INT("hybrid_e2e", 0, 0, 1),
+	PORT_ITEM_INT("ignore_source_id", 0, 0, 1),
+	PORT_ITEM_INT("ignore_transport_specific", 0, 0, 1),
 	PORT_ITEM_INT("ingressLatency", 0, INT_MIN, INT_MAX),
+	PORT_ITEM_INT("inhibit_announce", 0, 0, 1),
+	PORT_ITEM_INT("inhibit_delay_req", 0, 0, 1),
+	PORT_ITEM_INT("inhibit_multicast_service", 0, 0, 1),
+	GLOB_ITEM_INT("initial_delay", 0, 0, INT_MAX),
+	PORT_ITEM_INT("interface_rate_tlv", 0, 0, 1),
 	GLOB_ITEM_INT("kernel_leap", 1, 0, 1),
+	GLOB_ITEM_STR("leapfile", NULL),
 	PORT_ITEM_INT("logAnnounceInterval", 1, INT8_MIN, INT8_MAX),
 	PORT_ITEM_INT("logMinDelayReqInterval", 0, INT8_MIN, INT8_MAX),
 	PORT_ITEM_INT("logMinPdelayReqInterval", 0, INT8_MIN, INT8_MAX),
 	PORT_ITEM_INT("logSyncInterval", 0, INT8_MIN, INT8_MAX),
 	GLOB_ITEM_INT("logging_level", LOG_INFO, PRINT_LEVEL_MIN, PRINT_LEVEL_MAX),
+	PORT_ITEM_INT("masterOnly", 0, 0, 1), /*deprecated*/
+	GLOB_ITEM_INT("maxStepsRemoved", 255, 2, UINT8_MAX),
 	GLOB_ITEM_STR("message_tag", NULL),
 	GLOB_ITEM_STR("manufacturerIdentity", "00:00:00"),
 	GLOB_ITEM_INT("max_frequency", 900000000, 0, INT_MAX),
 	PORT_ITEM_INT("min_neighbor_prop_delay", -20000000, INT_MIN, -1),
+	PORT_ITEM_INT("msg_interval_request", 0, 0, 1),
 	PORT_ITEM_INT("neighborPropDelayThresh", 20000000, 0, INT_MAX),
+	PORT_ITEM_INT("net_sync_monitor", 0, 0, 1),
 	PORT_ITEM_ENU("network_transport", TRANS_UDP_IPV4, nw_trans_enu),
 	GLOB_ITEM_INT("ntpshm_segment", 0, INT_MIN, INT_MAX),
 	GLOB_ITEM_INT("offsetScaledLogVariance", 0xffff, 0, UINT16_MAX),
+	PORT_ITEM_INT("operLogPdelayReqInterval", 0, INT8_MIN, INT8_MAX),
+	PORT_ITEM_INT("operLogSyncInterval", 0, INT8_MIN, INT8_MAX),
 	PORT_ITEM_INT("path_trace_enabled", 0, 0, 1),
+	PORT_ITEM_INT("phc_index", -1, -1, INT_MAX),
 	GLOB_ITEM_DBL("pi_integral_const", 0.0, 0.0, DBL_MAX),
 	GLOB_ITEM_DBL("pi_integral_exponent", 0.4, -DBL_MAX, DBL_MAX),
 	GLOB_ITEM_DBL("pi_integral_norm_max", 0.3, DBL_MIN, 2.0),
@@ -225,55 +308,65 @@ struct config_item config_tab[] = {
 	GLOB_ITEM_DBL("pi_proportional_exponent", -0.3, -DBL_MAX, DBL_MAX),
 	GLOB_ITEM_DBL("pi_proportional_norm_max", 0.7, DBL_MIN, 1.0),
 	GLOB_ITEM_DBL("pi_proportional_scale", 0.0, 0.0, DBL_MAX),
+	PORT_ITEM_ENU("power_profile.version", IEEE_C37_238_VERSION_NONE, ieee_c37_238_enu),
+	PORT_ITEM_INT("power_profile.2011.grandmasterTimeInaccuracy", 0xFFFFFFFF, -1, INT_MAX),
+	PORT_ITEM_INT("power_profile.2011.networkTimeInaccuracy", 0xFFFFFFFF, -1, INT_MAX),
+	PORT_ITEM_INT("power_profile.2017.totalTimeInaccuracy", 0xFFFFFFFF, -1, INT_MAX),
+	PORT_ITEM_INT("power_profile.grandmasterID", 0, 0, 0xFFFF),
 	GLOB_ITEM_INT("priority1", 128, 0, UINT8_MAX),
 	GLOB_ITEM_INT("priority2", 128, 0, UINT8_MAX),
 	GLOB_ITEM_STR("productDescription", ";;"),
 	PORT_ITEM_STR("ptp_dst_mac", "01:1B:19:00:00:00"),
 	PORT_ITEM_STR("p2p_dst_mac", "01:80:C2:00:00:0E"),
+	GLOB_ITEM_STR("refclock_sock_address", "/var/run/refclock.ptp.sock"),
 	GLOB_ITEM_STR("revisionData", ";;"),
 	GLOB_ITEM_INT("sanity_freq_limit", 200000000, 0, INT_MAX),
-	GLOB_ITEM_INT("slaveOnly", 0, 0, 1),
-#ifdef KSZ_1588_PTP
-	GLOB_ITEM_DBL("step_threshold", 0.00008, 0.0, DBL_MAX),
-#else
+	PORT_ITEM_INT("serverOnly", 0, 0, 1),
+	GLOB_ITEM_INT("servo_num_offset_values", 10, 0, INT_MAX),
+	GLOB_ITEM_INT("servo_offset_threshold", 0, 0, INT_MAX),
+	GLOB_ITEM_STR("slave_event_monitor", ""),
+	GLOB_ITEM_INT("slaveOnly", 0, 0, 1), /*deprecated*/
+	GLOB_ITEM_INT("socket_priority", 0, 0, 15),
 	GLOB_ITEM_DBL("step_threshold", 0.0, 0.0, DBL_MAX),
-#endif
+	GLOB_ITEM_INT("step_window", 0, 0, INT_MAX),
 	GLOB_ITEM_INT("summary_interval", 0, INT_MIN, INT_MAX),
 	PORT_ITEM_INT("syncReceiptTimeout", 0, 0, UINT8_MAX),
+	GLOB_ITEM_INT("tc_spanning_tree", 0, 0, 1),
 	GLOB_ITEM_INT("timeSource", INTERNAL_OSCILLATOR, 0x10, 0xfe),
 	GLOB_ITEM_ENU("time_stamping", TS_HARDWARE, timestamping_enu),
 	PORT_ITEM_INT("transportSpecific", 0, 0, 0x0F),
+	PORT_ITEM_INT("ts2phc.channel", 0, 0, INT_MAX),
+	PORT_ITEM_INT("ts2phc.extts_correction", 0, INT_MIN, INT_MAX),
+	PORT_ITEM_ENU("ts2phc.extts_polarity", PTP_RISING_EDGE, extts_polarity_enu),
+	PORT_ITEM_INT("ts2phc.master", 0, 0, 1),
+	PORT_ITEM_INT("ts2phc.nmea_baudrate", 9600, 300, INT_MAX),
+	GLOB_ITEM_STR("ts2phc.nmea_remote_host", ""),
+	GLOB_ITEM_STR("ts2phc.nmea_remote_port", ""),
+	GLOB_ITEM_STR("ts2phc.nmea_serialport", "/dev/ttyS0"),
+	PORT_ITEM_INT("ts2phc.perout_phase", -1, 0, 999999999),
+	PORT_ITEM_INT("ts2phc.pin_index", 0, 0, INT_MAX),
+	GLOB_ITEM_INT("ts2phc.pulsewidth", 500000000, 1000000, 999000000),
+	GLOB_ITEM_STR("ts2phc.tod_source", "generic"),
 	PORT_ITEM_ENU("tsproc_mode", TSPROC_FILTER, tsproc_enu),
 	GLOB_ITEM_INT("twoStepFlag", 1, 0, 1),
-	GLOB_ITEM_INT("tx_timestamp_timeout", 1, 1, INT_MAX),
+	GLOB_ITEM_INT("tx_timestamp_timeout", 10, 1, INT_MAX),
 	PORT_ITEM_INT("udp_ttl", 1, 1, 255),
 	PORT_ITEM_INT("udp6_scope", 0x0E, 0x00, 0x0F),
 	GLOB_ITEM_STR("uds_address", "/var/run/ptp4l"),
+	PORT_ITEM_INT("uds_file_mode", UDS_FILEMODE, 0, 0777),
+	GLOB_ITEM_STR("uds_ro_address", "/var/run/ptp4lro"),
+	PORT_ITEM_INT("uds_ro_file_mode", UDS_RO_FILEMODE, 0, 0777),
+	PORT_ITEM_INT("unicast_listen", 0, 0, 1),
+	PORT_ITEM_INT("unicast_master_table", 0, 0, INT_MAX),
+	PORT_ITEM_INT("unicast_req_duration", 3600, 10, INT_MAX),
 	GLOB_ITEM_INT("use_syslog", 1, 0, 1),
 	GLOB_ITEM_STR("userDescription", ""),
 	GLOB_ITEM_INT("utc_offset", CURRENT_UTC_OFFSET, 0, INT_MAX),
 	GLOB_ITEM_INT("verbose", 0, 0, 1),
-#ifdef KSZ_1588_PTP
-	GLOB_ITEM_INT("c37_238", 0, 0, 1),
-	GLOB_ITEM_INT("transparent", 1, 0, 1),
-	GLOB_ITEM_INT("skip_sync_check", 0, 0, 1),
-	GLOB_ITEM_INT("initialSyncReceiptTimeout", 1, 0, 20),
-	GLOB_ITEM_INT("waitPdelayReqInterval", 1, 0, 60),
-	GLOB_ITEM_INT("waitSyncInterval", 1, 0, 60),
-	PORT_ITEM_INT("followUpReceiptTimeout", 0, 0, INT_MAX),
-	PORT_ITEM_INT("syncTxContTimeout", 0, 0, INT_MAX),
-	PORT_ITEM_INT("masterOnly", 1, 0, 1),
-	PORT_ITEM_INT("initialLogSyncInterval", -3, INT8_MIN, INT8_MAX),
-	PORT_ITEM_INT("operLogSyncInterval", -2, INT8_MIN, INT8_MAX),
-	PORT_ITEM_INT("initialLogPdelayReqInterval", 0, INT8_MIN, INT8_MAX),
-	PORT_ITEM_INT("operLogPdelayReqInterval", 1, INT8_MIN, INT8_MAX),
-	PORT_ITEM_INT("neighborPropDelay", 0, 0, INT_MAX),
-	PORT_ITEM_INT("log_exception", 0, 0, 1),
-	PORT_ITEM_INT("no_announce", 0, 0, 1),
-	PORT_ITEM_INT("no_asCapable", 0, 0, 1),
-	PORT_ITEM_INT("no_id_check", 0, 0, 1),
-#endif
+	GLOB_ITEM_INT("write_phase_mode", 0, 0, 1),
 };
+
+static struct unicast_master_table *current_uc_mtab;
 
 static enum parser_result
 parse_fault_interval(struct config *cfg, const char *section,
@@ -285,7 +378,8 @@ static struct config_item *config_section_item(struct config *cfg,
 {
 	char buf[CONFIG_LABEL_SIZE + MAX_IFNAME_SIZE];
 
-	snprintf(buf, sizeof(buf), "%s.%s", section, name);
+	if (snprintf(buf, sizeof(buf), "%s.%s", section, name) >= sizeof(buf))
+		return NULL;
 	return hash_lookup(cfg->htab, buf);
 }
 
@@ -345,10 +439,103 @@ static void config_item_free(void *ptr)
 	free(ci);
 }
 
+static int config_switch_unicast_mtab(struct config *cfg, int idx, int line_num)
+{
+	struct unicast_master_table *table;
+
+	if (idx < 1) {
+		fprintf(stderr, "line %d: table_id %d is out of range. "
+			"Must be in the range %d to %d\n",
+			line_num, idx, 1, INT_MAX);
+		return -1;
+	}
+	STAILQ_FOREACH(table, &cfg->unicast_master_tables, list) {
+		if (table->table_index == idx) {
+			fprintf(stderr, "line %d: table_id %d already taken\n",
+				line_num, idx);
+			return -1;
+		}
+	}
+	table = calloc(1, sizeof(*table));
+	if (!table) {
+		fprintf(stderr, "low memory\n");
+		return -1;
+	}
+	STAILQ_INIT(&table->addrs);
+	table->table_index = idx;
+	memset(&table->peer_addr.portIdentity, 0xff,
+	       sizeof(table->peer_addr.portIdentity));
+	STAILQ_INSERT_TAIL(&cfg->unicast_master_tables, table, list);
+	current_uc_mtab = table;
+	return 0;
+}
+
+static int config_unicast_mtab_address(enum transport_type type, char *address,
+				       int line_num)
+{
+	struct unicast_master_address *item;
+
+	if (!current_uc_mtab) {
+		fprintf(stderr, "line %d: missing table_id\n", line_num);
+		return -1;
+	}
+	item = calloc(1, sizeof(*item));
+	if (!item) {
+		fprintf(stderr, "low memory\n");
+		return -1;
+	}
+	if (str2addr(type, address, &item->address)) {
+		fprintf(stderr, "line %d: bad address\n", line_num);
+		free(item);
+		return -1;
+	}
+	memset(&item->portIdentity, 0xff, sizeof(item->portIdentity));
+	item->type = type;
+	STAILQ_INSERT_TAIL(&current_uc_mtab->addrs, item, list);
+	current_uc_mtab->count++;
+
+	return 0;
+}
+
+static int config_unicast_mtab_peer(char *address, int line_num)
+{
+	if (!current_uc_mtab) {
+		fprintf(stderr, "line %d: missing table_id\n", line_num);
+		return -1;
+	}
+	if (current_uc_mtab->peer_name) {
+		free(current_uc_mtab->peer_name);
+	}
+	current_uc_mtab->peer_name = strdup(address);
+	if (!current_uc_mtab->peer_name) {
+		fprintf(stderr, "low memory\n");
+		return -1;
+	}
+	return 0;
+}
+
+static int config_unicast_mtab_query_interval(int lqi, int line_num)
+{
+	if (!current_uc_mtab) {
+		fprintf(stderr, "line %d: missing table_id\n", line_num);
+		return -1;
+	}
+	if (lqi < INT8_MIN || lqi > INT8_MAX) {
+		fprintf(stderr, "line %d: logQueryInterval %d out of range\n",
+			line_num, lqi);
+		return -1;
+	}
+	current_uc_mtab->logQueryInterval = lqi;
+	return 0;
+}
+
 static enum parser_result parse_section_line(char *s, enum config_section *section)
 {
 	if (!strcasecmp(s, "[global]")) {
 		*section = GLOBAL_SECTION;
+	} else if (!strcasecmp(s, "[unicast_master_table]")) {
+		*section = UC_MTAB_SECTION;
+		current_uc_mtab = NULL;
 	} else if (s[0] == '[') {
 		char c;
 		*section = PORT_SECTION;
@@ -489,6 +676,39 @@ static enum parser_result parse_fault_interval(struct config *cfg,
 	return NOT_PARSED;
 }
 
+static int parse_unicast_mtab_line(struct config *cfg, char *line, int line_num)
+{
+	char address[64 + 1] = {0}, transport[16 + 1] = {0};
+	enum transport_type type = TRANS_UDS;
+	struct config_enum *cte;
+	int cnt, lqi, table_id;
+
+	cnt = sscanf(line, " table_id %d", &table_id);
+	if (cnt == 1) {
+		return config_switch_unicast_mtab(cfg, table_id, line_num);
+	}
+	cnt = sscanf(line, " logQueryInterval %d", &lqi);
+	if (cnt == 1) {
+		return config_unicast_mtab_query_interval(lqi, line_num);
+	}
+	cnt = sscanf(line, " peer_address %64s", address);
+	if (cnt == 1) {
+		return config_unicast_mtab_peer(address, line_num);
+	}
+	cnt = sscanf(line, " %16s %64s", transport, address);
+	if (cnt != 2) {
+		fprintf(stderr, "bad master table at line %d\n", line_num);
+		return -1;
+	}
+	for (cte = nw_trans_enu; cte->label; cte++) {
+		if (!strcasecmp(cte->label, transport)) {
+			type = cte->value;
+			break;
+		}
+	}
+	return config_unicast_mtab_address(type, address, line_num);
+}
+
 static enum parser_result parse_setting_line(char *line,
 					     const char **option,
 					     const char **value)
@@ -521,6 +741,10 @@ static void check_deprecated_options(const char **option)
 		new_option = "first_step_threshold";
 	} else if (!strcmp(*option, "pi_max_frequency")) {
 		new_option = "max_frequency";
+	} else if (!strcmp(*option, "masterOnly")) {
+		new_option = "serverOnly";
+	} else if (!strcmp(*option, "slaveOnly")) {
+		new_option = "clientOnly";
 	}
 
 	if (new_option) {
@@ -530,7 +754,7 @@ static void check_deprecated_options(const char **option)
 	}
 }
 
-static struct option *config_alloc_longopts(struct config *cfg)
+static struct option *config_alloc_longopts(void)
 {
 	struct config_item *ci;
 	struct option *opts;
@@ -544,12 +768,14 @@ static struct option *config_alloc_longopts(struct config *cfg)
 		ci = &config_tab[i];
 		opts[i].name = ci->label;
 		opts[i].has_arg = required_argument;
+		/* Avoid bug in detection of ambiguous options in glibc */
+		opts[i].flag = &opts[i].val;
 	}
 
 	return opts;
 }
 
-int config_read(char *name, struct config *cfg)
+int config_read(const char *name, struct config *cfg)
 {
 	enum config_section current_section = UNKNOWN_SECTION;
 	enum parser_result parser_res;
@@ -603,6 +829,13 @@ int config_read(char *name, struct config *cfg)
 			continue;
 		}
 
+		if (current_section == UC_MTAB_SECTION) {
+			if (parse_unicast_mtab_line(cfg, line, line_num)) {
+				goto parse_error;
+			}
+			continue;
+		}
+
 		if (current_section == UNKNOWN_SECTION) {
 			fprintf(stderr, "line %d is not in a section\n", line_num);
 			goto parse_error;
@@ -611,15 +844,15 @@ int config_read(char *name, struct config *cfg)
 		if (parse_setting_line(line, &option, &value)) {
 			fprintf(stderr, "could not parse line %d in %s section\n",
 				line_num, current_section == GLOBAL_SECTION ?
-				"global" : current_port->name);
+				"global" : interface_name(current_port));
 			goto parse_error;
 		}
 
 		check_deprecated_options(&option);
 
 		parser_res = parse_item(cfg, 0, current_section == GLOBAL_SECTION ?
-					NULL : current_port->name, option, value);
-
+					NULL : interface_name(current_port),
+					option, value);
 		switch (parser_res) {
 		case PARSED_OK:
 			break;
@@ -627,7 +860,7 @@ int config_read(char *name, struct config *cfg)
 			fprintf(stderr, "unknown option %s at line %d in %s section\n",
 				option, line_num,
 				current_section == GLOBAL_SECTION ? "global" :
-				current_port->name);
+				interface_name(current_port));
 			goto parse_error;
 		case BAD_VALUE:
 			fprintf(stderr, "%s is a bad value for option %s at line %d\n",
@@ -653,93 +886,15 @@ parse_error:
 	return -2;
 }
 
-#ifdef KSZ_1588_PTP
-static char* saved_global_configs[] = {
-	"log_exception",
-	"no_announce",
-	"no_asCapable",
-	"no_id_check",
-	"initialSyncReceiptTimeout",
-	"waitPdelayReqInterval",
-	"waitSyncInterval",
-	NULL,
-};
-
-static char* saved_configs[] = {
-	"masterOnly",
-	"initialLogPdelayReqInterval",
-	"operLogPdelayReqInterval",
-	"initialLogSyncInterval",
-	"operLogSyncInterval",
-	"neighborPropDelay",
-	NULL,
-};
-
-int config_write(char *name, struct config *cfg)
+struct interface *config_create_interface(const char *name, struct config *cfg)
 {
 	struct interface *iface;
-	FILE *fp;
-	int i;
-	int len;
-	int val;
-	char *one_tab = "\t";
-	char *two_tab = "\t\t";
-	char *three_tab = "\t\t\t";
-	char *tab;
-
-	fp = fopen(name, "wt");
-	fprintf(fp, "[global]\n");
-	i = 0;
-	while (saved_global_configs[i]) {
-		len = strlen(saved_global_configs[i]);
-		len = (31 - len) / 8;
-		tab = one_tab;
-		if (len >= 2)
-			tab = three_tab;
-		else if (len >= 1)
-			tab = two_tab;
-		val = config_get_int(cfg, NULL,
-				     saved_global_configs[i]);
-		fprintf(fp, "%s%s%d\n", saved_global_configs[i], tab, val);
-		i++;
-	}
-	fprintf(fp, "\n");
+	const char *ifname;
 
 	/* only create each interface once (by name) */
 	STAILQ_FOREACH(iface, &cfg->interfaces, list) {
-		fprintf(fp, "[%s]\n", iface->name);
-		i = 0;
-		while (saved_configs[i]) {
-			len = strlen(saved_configs[i]);
-			len = (31 - len) / 8;
-			tab = one_tab;
-			if (len >= 2)
-				tab = three_tab;
-			else if (len >= 1)
-				tab = two_tab;
-			val = config_get_int(cfg, iface->name,
-					     saved_configs[i]);
-			fprintf(fp, "%s%s%d\n", saved_configs[i], tab, val);
-			i++;
-		}
-		fprintf(fp, "\n");
-	}
-	fclose(fp);
-	return 0;
-}
-#endif
-
-struct interface *config_create_interface(char *name, struct config *cfg)
-{
-	struct interface *iface;
-#ifdef KSZ_1588_PTP
-	static char ext[20];
-	static int ext_len = 0;
-#endif
-
-	/* only create each interface once (by name) */
-	STAILQ_FOREACH(iface, &cfg->interfaces, list) {
-		if (0 == strncmp(name, iface->name, MAX_IFNAME_SIZE))
+		ifname = interface_name(iface);
+		if (0 == strncmp(name, ifname, MAX_IFNAME_SIZE))
 			return iface;
 	}
 
@@ -747,52 +902,11 @@ struct interface *config_create_interface(char *name, struct config *cfg)
 	if (cfg->no_auto_create)
 		return NULL;
 #endif
-	iface = calloc(1, sizeof(struct interface));
+	iface = interface_create(name);
 	if (!iface) {
 		fprintf(stderr, "cannot allocate memory for a port\n");
 		return NULL;
 	}
-
-	strncpy(iface->name, name, MAX_IFNAME_SIZE);
-#ifdef KSZ_1588_PTP
-	do {
-		char *s;
-
-		strncpy(iface->basename, name, MAX_IFNAME_SIZE);
-		s = strchr(iface->basename, '.');
-		if (s) {
-			char *t = s;
-
-			s++;
-			s = strchr(s, '.');
-			if (s) {
-				if (!ext_len) {
-					strcpy(ext, s);
-					ext_len = strlen(ext);
-				} else {
-					if (strncmp(ext, s, ext_len))
-						printf("not same ext\n");
-				}
-				*s = '\0';
-			} else if (ext_len && !strncmp(ext, t, ext_len)) {
-				*t = '\0';
-			}
-		}
-		strncpy(iface->devname, name, MAX_IFNAME_SIZE);
-		s = strchr(iface->devname, '.');
-		if (s)
-			*s = '\0';
-
-		/*
-		 * sk_get_ts_info cannot get correct information from VLAN
-		 * device.
-		 */
-		name = iface->devname;
-	} while (0);
-	sk_get_ts_info(name, &iface->ts_info);
-#else
-	sk_get_ts_info(iface->name, &iface->ts_info);
-#endif
 	STAILQ_INSERT_TAIL(&cfg->interfaces, iface, list);
 	cfg->n_interfaces++;
 
@@ -811,8 +925,9 @@ struct config *config_create(void)
 		return NULL;
 	}
 	STAILQ_INIT(&cfg->interfaces);
+	STAILQ_INIT(&cfg->unicast_master_tables);
 
-	cfg->opts = config_alloc_longopts(cfg);
+	cfg->opts = config_alloc_longopts();
 	if (!cfg->opts) {
 		free(cfg);
 		return NULL;
@@ -829,7 +944,11 @@ struct config *config_create(void)
 	for (i = 0; i < N_CONFIG_ITEMS; i++) {
 		ci = &config_tab[i];
 		ci->flags |= CFG_ITEM_STATIC;
-		snprintf(buf, sizeof(buf), "global.%s", ci->label);
+		if (snprintf(buf, sizeof(buf), "global.%s", ci->label) >=
+		    sizeof(buf)) {
+			fprintf(stderr, "option %s too long\n", ci->label);
+			goto fail;
+		}
 		if (hash_insert(cfg->htab, buf, ci)) {
 			fprintf(stderr, "duplicate item %s\n", ci->label);
 			goto fail;
@@ -856,11 +975,24 @@ fail:
 
 void config_destroy(struct config *cfg)
 {
+	struct unicast_master_address *address;
+	struct unicast_master_table *table;
 	struct interface *iface;
 
 	while ((iface = STAILQ_FIRST(&cfg->interfaces))) {
 		STAILQ_REMOVE_HEAD(&cfg->interfaces, list);
-		free(iface);
+		interface_destroy(iface);
+	}
+	while ((table = STAILQ_FIRST(&cfg->unicast_master_tables))) {
+		while ((address = STAILQ_FIRST(&table->addrs))) {
+			STAILQ_REMOVE_HEAD(&table->addrs, list);
+			free(address);
+		}
+		if (table->peer_name) {
+			free(table->peer_name);
+		}
+		STAILQ_REMOVE_HEAD(&cfg->unicast_master_tables, list);
+		free(table);
 	}
 	hash_destroy(cfg->htab, config_item_free);
 	free(cfg->opts);
@@ -914,9 +1046,49 @@ char *config_get_string(struct config *cfg, const char *section,
 	return ci->val.s;
 }
 
+int config_harmonize_onestep(struct config *cfg)
+{
+	enum timestamp_type tstype = config_get_int(cfg, NULL, "time_stamping");
+	int two_step_flag = config_get_int(cfg, NULL, "twoStepFlag");
+
+	switch (tstype) {
+	case TS_SOFTWARE:
+	case TS_LEGACY_HW:
+		if (!two_step_flag) {
+			pr_err("one step is only possible "
+			       "with hardware time stamping");
+			return -1;
+		}
+		break;
+	case TS_HARDWARE:
+		if (!two_step_flag) {
+			pr_debug("upgrading to one step time stamping "
+				 "in order to match the twoStepFlag");
+			if (config_set_int(cfg, "time_stamping", TS_ONESTEP)) {
+				return -1;
+			}
+		}
+		break;
+	case TS_ONESTEP:
+	case TS_P2P1STEP:
+		if (two_step_flag) {
+			pr_debug("one step mode implies twoStepFlag=0, "
+				 "clearing twoStepFlag to match");
+			if (config_set_int(cfg, "twoStepFlag", 0)) {
+				return -1;
+			}
+		}
+		break;
+	}
+
+	return 0;
+}
+
 int config_parse_option(struct config *cfg, const char *opt, const char *val)
 {
 	enum parser_result result;
+
+	check_deprecated_options(&opt);
 
 	result = parse_item(cfg, 1, NULL, opt, val);
 

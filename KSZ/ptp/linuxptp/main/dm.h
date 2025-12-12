@@ -34,9 +34,8 @@ enum delay_mechanism {
 	/** Peer delay mechanism. */
 	DM_P2P,
 
-#ifdef KSZ_1588_PTP
-	DM_NONE
-#endif
+	/** No Delay Mechanism. */
+	DM_NO_MECHANISM = 0xFE,
 };
 
 #endif

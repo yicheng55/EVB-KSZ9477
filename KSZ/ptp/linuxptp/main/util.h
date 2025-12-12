@@ -20,10 +20,18 @@
 #ifndef HAVE_UTIL_H
 #define HAVE_UTIL_H
 
+#include <string.h>
 #include <time.h>
 
+#include "address.h"
 #include "ddt.h"
 #include "ether.h"
+#include "fsm.h"
+#include "transport.h"
+#include "unicast_fsm.h"
+
+#define MAX_PRINT_BYTES 16
+#define BIN_BUF_SIZE (MAX_PRINT_BYTES * 3 + 1)
 
 /**
  * Table of human readable strings, one for each port state.
@@ -36,6 +44,38 @@ extern const char *ps_str[];
 extern const char *ev_str[];
 
 /**
+ * Gets a human-readable string for a given timestamp type.
+ * @param ts    Timestamp type.
+ * @return      Human-readable rendering if TS is valid, otherwise "???".
+ */
+const char *ts_str(enum timestamp_type ts);
+
+/**
+ * Compares two binary addresses for equality.
+ * @param type  One of the enumerated transport types.
+ * @param a     One address to compare.
+ * @param b     The second address to compare.
+ * @return      One if the addresses are identical, zero otherwise.
+ */
+int addreq(enum transport_type type, struct address *a, struct address *b);
+
+static inline uint16_t align16(void *p)
+{
+	uint16_t v;
+	memcpy(&v, p, sizeof(v));
+	return v;
+}
+
+static inline uint32_t align32(void *p)
+{
+	uint32_t v;
+	memcpy(&v, p, sizeof(v));
+	return v;
+}
+
+char *bin2str_impl(Octet *data, int len, char *buf, int buf_len);
+
+/**
  * Convert a clock identity into a human readable string.
  *
  * Note that this function uses a static global variable to store the
@@ -45,6 +85,18 @@ extern const char *ev_str[];
  * @return    Pointer to a static global buffer holding the result.
  */
 char *cid2str(struct ClockIdentity *id);
+
+/**
+ * Compare two clock identities for equality.
+ *
+ * @param a  First clock identity.
+ * @param b  Second clock identity.
+ * @return   1 if identities are equal, 0 otherwise.
+ */
+static inline int cid_eq(struct ClockIdentity *a, struct ClockIdentity *b)
+{
+	return memcmp(a, b, sizeof(*a)) == 0;
+}
 
 /**
  * Counts the number of occurrences of a given character.
@@ -65,6 +117,53 @@ int count_char(const char *str, char c);
  */
 char *pid2str(struct PortIdentity *id);
 
+char *portaddr2str(struct PortAddress *addr);
+
+const char *ustate2str(enum unicast_state ustate);
+
+/**
+ * Reduce all port states for which the sync direction isn't known to
+ * PS_DISABLED, and report the given port state otherwise. This minimizes port
+ * state transitions for PMC agents when nothing interesting happened.
+ */
+enum port_state port_state_normalize(enum port_state state);
+
+/**
+ * Closes a dynamic posix clock.
+ * @param clock  A clock ID obtained via posix_clock_close().
+ */
+void posix_clock_close(clockid_t clock);
+
+/**
+ * Opens a dynamic posix clock by name.
+ * @param device     The PHC character device or network interface to open.
+ * @param phc_index  Returns the PHC index, if any.
+ * @return           A valid clock ID on success or CLOCK_INVALID otherwise.
+ */
+clockid_t posix_clock_open(const char *device, int *phc_index);
+
+/**
+ * Compare two port identities for equality.
+ *
+ * @param a  First port identity.
+ * @param b  Second port identity.
+ * @return   1 if identities are equal, 0 otherwise.
+ */
+static inline int pid_eq(const struct PortIdentity *a,
+			 const struct PortIdentity *b)
+{
+	return memcmp(a, b, sizeof(*a)) == 0;
+}
+
+/**
+ * Convert a string containing a network address into binary form.
+ * @param type  The network transport type of the address.
+ * @param s     String in human readable form.
+ * @param addr  Pointer to a buffer to hold the result.
+ * @return Zero on success, or -1 if the string is incorrectly formatted.
+ */
+int str2addr(enum transport_type type, const char *s, struct address *addr);
+
 /**
  * Scan a string containing a MAC address and convert it into binary form.
  *
@@ -73,6 +172,15 @@ char *pid2str(struct PortIdentity *id);
  * @return Zero on success, or -1 if the string is incorrectly formatted.
  */
 int str2mac(const char *s, unsigned char mac[MAC_LEN]);
+
+/**
+ * Scan a string containing a clock identity and convert it into binary form.
+ *
+ * @param s       String in human readable form.
+ * @param result  Pointer to a buffer to hold the result.
+ * @return Zero on success, or -1 if the string is incorrectly formatted.
+ */
+int str2cid(const char *s, struct ClockIdentity *result);
 
 /**
  * Scan a string containing a port identity and convert it into binary form.

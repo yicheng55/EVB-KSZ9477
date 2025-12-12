@@ -23,12 +23,22 @@
 #include <stdio.h>
 #include <sys/queue.h>
 #include <time.h>
+#include <asm/byteorder.h>
 
 #include "address.h"
 #include "ddt.h"
 #include "tlv.h"
+#include "tmv.h"
 
-#define PTP_VERSION 2
+/* Version definition for IEEE 1588-2019 */
+#define PTP_MAJOR_VERSION	2
+#define PTP_MINOR_VERSION	1
+#define PTP_VERSION		(PTP_MINOR_VERSION << 4 | PTP_MAJOR_VERSION)
+
+#define MAJOR_VERSION_MASK	0x0f
+
+/* Values for the transportSpecific field */
+#define TS_IEEE_8021AS (1<<4)
 
 /* Values for the messageType field */
 #define SYNC                  0x0
@@ -54,32 +64,31 @@
 #define PTP_TIMESCALE  (1<<3)
 #define TIME_TRACEABLE (1<<4)
 #define FREQ_TRACEABLE (1<<5)
+#define SYNC_UNCERTAIN (1<<6)
+
+/*
+ * Signaling interval special values. For more info look at 802.1AS table 10-11
+ */
+#define SIGNAL_NO_CHANGE   -128
+#define SIGNAL_SET_INITIAL 126
 
 enum timestamp_type {
 	TS_SOFTWARE,
 	TS_HARDWARE,
 	TS_LEGACY_HW,
 	TS_ONESTEP,
+	TS_P2P1STEP,
 };
 
 struct hw_timestamp {
 	enum timestamp_type type;
-	struct timespec ts;
-	struct timespec sw;
-};
-
-enum controlField {
-	CTL_SYNC,
-	CTL_DELAY_REQ,
-	CTL_FOLLOW_UP,
-	CTL_DELAY_RESP,
-	CTL_MANAGEMENT,
-	CTL_OTHER,
+	tmv_t ts;
+	tmv_t sw;
 };
 
 struct ptp_header {
 	uint8_t             tsmt; /* transportSpecific | messageType */
-	uint8_t             ver;  /* reserved          | versionPTP  */
+	uint8_t             ver;  /* minorVersionPTP   | versionPTP  */
 	UInteger16          messageLength;
 	UInteger8           domainNumber;
 	Octet               reserved1;
@@ -109,11 +118,13 @@ struct announce_msg {
 struct sync_msg {
 	struct ptp_header   hdr;
 	struct Timestamp    originTimestamp;
+	uint8_t             suffix[0];
 } PACKED;
 
 struct delay_req_msg {
 	struct ptp_header   hdr;
 	struct Timestamp    originTimestamp;
+	uint8_t             suffix[0];
 } PACKED;
 
 struct follow_up_msg {
@@ -133,12 +144,14 @@ struct pdelay_req_msg {
 	struct ptp_header   hdr;
 	struct Timestamp    originTimestamp;
 	struct PortIdentity reserved;
+	uint8_t             suffix[0];
 } PACKED;
 
 struct pdelay_resp_msg {
 	struct ptp_header   hdr;
 	struct Timestamp    requestReceiptTimestamp;
 	struct PortIdentity requestingPortIdentity;
+	uint8_t             suffix[0];
 } PACKED;
 
 struct pdelay_resp_fup_msg {
@@ -220,15 +233,10 @@ struct ptp_message {
 	 */
 	struct address address;
 	/**
-	 * Contains the number of TLVs in the suffix.
+	 * List of TLV descriptors.  Each item in the list contains
+	 * pointers to the appended TLVs.
 	 */
-	int tlv_count;
-	/**
-	 * Used to hold the data of the last TLV in the message when
-	 * the layout of the TLV makes it difficult to access the data
-	 * directly from the message's buffer.
-	 */
-	struct tlv_extra last_tlv;
+	TAILQ_HEAD(tlv_list, tlv_extra) tlv_list;
 };
 
 /**
@@ -242,6 +250,30 @@ static inline uint8_t management_action(struct ptp_message *m)
 }
 
 /**
+ * Obtain the data field from the TLV in a management message.
+ * @param m  A management message.
+ * @return   A pointer to the TLV data field.
+ */
+static inline void *management_tlv_data(struct ptp_message *msg)
+{
+	struct management_tlv *mgt;
+	mgt = (struct management_tlv *) msg->management.suffix;
+	return mgt->data;
+}
+
+/**
+ * Obtain the managementId field from the TLV in a management message.
+ * @param m  A management message.
+ * @return   The value of the ID field.
+ */
+static inline int management_tlv_id(struct ptp_message *m)
+{
+	struct management_tlv *mgt;
+	mgt = (struct management_tlv *) m->management.suffix;
+	return mgt->id;
+}
+
+/**
  * Test a given bit in a message's flag field.
  * @param m      Message to test.
  * @param index  Index into flag field, either 0 or 1.
@@ -252,6 +284,37 @@ static inline Boolean field_is_set(struct ptp_message *m, int index, Octet bit)
 {
 	return m->header.flagField[index] & bit ? TRUE : FALSE;
 }
+
+/**
+ * Append a new TLV onto a message for transmission.
+ *
+ * This is a high level API designed for the transmit path.  The
+ * function allocates a new descriptor, initializes its .tlv field,
+ * and ensures that the TLV will fit into the message buffer.  This
+ * function increments the message length field by 'length' before
+ * returning.
+ *
+ * @param msg     A message obtained using msg_allocate().  At a mininum,
+ *                the message type and length fields must set by the caller.
+ * @param length  The length of the TLV to append.
+ * @return        A pointer to a TLV descriptor on success or NULL otherwise.
+ */
+struct tlv_extra *msg_tlv_append(struct ptp_message *msg, int length);
+
+/**
+ * Place a TLV descriptor into a message's list of TLVs.
+ *
+ * @param msg     A message obtained using msg_allocate().
+ * @param extra   The TLV to be added to the list.
+ */
+void msg_tlv_attach(struct ptp_message *msg, struct tlv_extra *extra);
+
+/*
+ * Return the number of TLVs attached to a message.
+ * @param msg  A message obtained using @ref msg_allocate().
+ * @return     The number of attached TLVs.
+ */
+int msg_tlv_count(struct ptp_message *msg);
 
 /**
  * Obtain the transportSpecific field from a message.
@@ -269,7 +332,7 @@ static inline UInteger8 msg_transport_specific(struct ptp_message *m)
  * @param m  Message to test.
  * @return   The value of the messageType field.
  */
-static inline int msg_type(struct ptp_message *m)
+static inline int msg_type(const struct ptp_message *m)
 {
 	return m->header.tsmt & 0x0f;
 }
@@ -365,7 +428,17 @@ int msg_sots_missing(struct ptp_message *m);
  */
 static inline int msg_sots_valid(struct ptp_message *m)
 {
-	return (m->hwts.ts.tv_sec || m->hwts.ts.tv_nsec) ? 1 : 0;
+	return !tmv_is_zero(m->hwts.ts);
+}
+
+/**
+ * Test whether a message is a unicast message.
+ * @param m  Message to test.
+ * @return   One if the message is unicast, zero otherwise.
+ */
+static inline Boolean msg_unicast(struct ptp_message *m)
+{
+	return field_is_set(m, 0, UNICAST);
 }
 
 /**
@@ -388,11 +461,17 @@ static inline Boolean one_step(struct ptp_message *m)
 /**
  * Convert a 64 bit word into network byte order.
  */
-int64_t host2net64(int64_t val);
+static inline int64_t host2net64(int64_t val)
+{
+	return __cpu_to_be64(val);
+}
 
 /**
  * Convert a 64 bit word into host byte order.
  */
-int64_t net2host64(int64_t val);
+static inline int64_t net2host64(int64_t val)
+{
+	return __be64_to_cpu(val);
+}
 
 #endif

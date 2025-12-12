@@ -22,6 +22,11 @@
 
 #include <stdint.h>
 
+#ifdef KSZ_1588_PTP
+#define KSZ_1588_PTP_DELAYED_PATH_DELAY
+#define KSZ_ACCURATE_PATH_DELAY_DRIFT  50000
+#endif
+
 struct config;
 
 /** Opaque type */
@@ -35,6 +40,7 @@ enum servo_type {
 	CLOCK_SERVO_LINREG,
 	CLOCK_SERVO_NTPSHM,
 	CLOCK_SERVO_NULLF,
+	CLOCK_SERVO_REFCLOCK_SOCK,
 };
 
 /**
@@ -48,7 +54,7 @@ enum servo_state {
 	SERVO_UNLOCKED,
 
 	/**
-	 * The is ready to track and requests a clock jump to
+	 * The servo is ready to track and requests a clock jump to
 	 * immediately correct the estimated offset.
 	 */
 	SERVO_JUMP,
@@ -58,9 +64,14 @@ enum servo_state {
 	 */
 	SERVO_LOCKED,
 
-#ifdef KSZ_1588_PTP
+	/**
+	 * The Servo has stabilized. The last 'servo_num_offset_values' values
+	 * of the estimated threshold are less than servo_offset_threshold.
+	 */
+	SERVO_LOCKED_STABLE,
+
+#ifdef KSZ_1588_PTP_DELAYED_PATH_DELAY
 	SERVO_LOCKING,
-	SERVO_JUMP_LONG,
 #endif
 };
 
@@ -76,7 +87,7 @@ enum servo_state {
  * @return A pointer to a new servo on success, NULL otherwise.
  */
 struct servo *servo_create(struct config *cfg, enum servo_type type,
-			   int fadj, int max_ppb, int sw_ts);
+			   double fadj, int max_ppb, int sw_ts);
 
 /**
  * Destroy an instance of a clock servo.
@@ -127,5 +138,12 @@ double servo_rate_ratio(struct servo *servo);
  *                will be deleted, 0 when it passed.
  */
 void servo_leap(struct servo *servo, int leap);
+
+/**
+ * Get the offset threshold for triggering the interval change request.
+ * @param servo   Pointer to a servo obtained via @ref servo_create().
+ * @return        The offset threshold set by the user.
+ */
+int servo_offset_threshold(struct servo *servo);
 
 #endif

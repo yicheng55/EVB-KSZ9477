@@ -15,21 +15,27 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-KBUILD_OUTPUT =
+KBUILD_OUTPUT ?=
 
 DEBUG	=
 CC	= $(CROSS_COMPILE)gcc
 VER     = -DVER=$(version)
 CFLAGS	= -Wall $(VER) $(incdefs) $(DEBUG) $(EXTRA_CFLAGS)
-LDLIBS	= -lm -lrt $(EXTRA_LDFLAGS)
-PRG	= ptp4l pmc phc2sys hwstamp_ctl phc_ctl timemaster
-OBJ     = bmc.o clock.o clockadj.o clockcheck.o config.o fault.o \
- filter.o fsm.o hash.o linreg.o mave.o mmedian.o msg.o ntpshm.o nullf.o phc.o \
- pi.o port.o print.o ptp4l.o raw.o rtnl.o servo.o sk.o stats.o tlv.o \
- transport.o tsproc.o udp.o udp6.o uds.o util.o version.o
+LDLIBS	= -lm -lrt -pthread $(EXTRA_LDFLAGS)
+PRG	= ptp4l hwstamp_ctl nsm phc2sys phc_ctl pmc timemaster ts2phc tz2alt
+FILTERS	= filter.o mave.o mmedian.o
+SERVOS	= linreg.o ntpshm.o nullf.o pi.o refclock_sock.o servo.o
+TRANSP	= raw.o transport.o udp.o udp6.o uds.o
+TS2PHC	= ts2phc.o lstab.o nmea.o serial.o sock.o ts2phc_generic_pps_source.o \
+ ts2phc_nmea_pps_source.o ts2phc_phc_pps_source.o ts2phc_pps_sink.o ts2phc_pps_source.o
+OBJ	= bmc.o clock.o clockadj.o clockcheck.o config.o designated_fsm.o \
+ e2e_tc.o fault.o $(FILTERS) fsm.o hash.o interface.o monitor.o msg.o phc.o \
+ port.o port_signaling.o pqueue.o print.o ptp4l.o p2p_tc.o rtnl.o $(SERVOS) \
+ sk.o stats.o tc.o $(TRANSP) telecom.o tlv.o tsproc.o unicast_client.o \
+ unicast_fsm.o unicast_service.o util.o version.o
 
-OBJECTS	= $(OBJ) hwstamp_ctl.o phc2sys.o phc_ctl.o pmc.o pmc_common.o \
- sysoff.o timemaster.o
+OBJECTS	= $(OBJ) hwstamp_ctl.o nsm.o phc2sys.o phc_ctl.o pmc.o pmc_agent.o \
+ pmc_common.o sysoff.o timemaster.o $(TS2PHC) tz2alt.o
 SRC	= $(OBJECTS:.o=.c)
 DEPEND	= $(OBJECTS:.o=.d)
 srcdir	:= $(dir $(lastword $(MAKEFILE_LIST)))
@@ -46,19 +52,28 @@ all: $(PRG)
 
 ptp4l: $(OBJ)
 
-pmc: config.o hash.o msg.o pmc.o pmc_common.o print.o raw.o sk.o tlv.o \
- transport.o udp.o udp6.o uds.o util.o version.o
+nsm: config.o $(FILTERS) hash.o interface.o msg.o nsm.o phc.o print.o \
+ rtnl.o sk.o $(TRANSP) tlv.o tsproc.o util.o version.o
 
-phc2sys: clockadj.o clockcheck.o config.o hash.o linreg.o msg.o ntpshm.o \
- nullf.o phc.o phc2sys.o pi.o pmc_common.o print.o raw.o servo.o sk.o stats.o \
- sysoff.o tlv.o transport.o udp.o udp6.o uds.o util.o version.o \
- filter.o mave.o mmedian.o
+pmc: config.o hash.o interface.o msg.o phc.o pmc.o pmc_common.o print.o sk.o \
+ tlv.o $(TRANSP) util.o version.o
+
+phc2sys: clockadj.o clockcheck.o config.o hash.o interface.o msg.o \
+ phc.o phc2sys.o pmc_agent.o pmc_common.o print.o $(SERVOS) sk.o stats.o \
+ sysoff.o tlv.o $(TRANSP) util.o version.o
 
 hwstamp_ctl: hwstamp_ctl.o version.o
 
 phc_ctl: phc_ctl.o phc.o sk.o util.o clockadj.o sysoff.o print.o version.o
 
-timemaster: print.o sk.o timemaster.o util.o version.o
+timemaster: phc.o print.o rtnl.o sk.o timemaster.o util.o version.o
+
+ts2phc: config.o clockadj.o hash.o interface.o msg.o phc.o pmc_agent.o \
+ pmc_common.o print.o $(SERVOS) sk.o $(TS2PHC) tlv.o transport.o raw.o \
+ udp.o udp6.o uds.o util.o version.o
+
+tz2alt: config.o hash.o interface.o lstab.o msg.o phc.o pmc_common.o print.o \
+ sk.o tlv.o $(TRANSP) tz2alt.o util.o version.o
 
 version.o: .version version.sh $(filter-out version.d,$(DEPEND))
 
@@ -72,7 +87,9 @@ force:
 install: $(PRG)
 	install -p -m 755 -d $(DESTDIR)$(sbindir) $(DESTDIR)$(man8dir)
 	install $(PRG) $(DESTDIR)$(sbindir)
-	install -p -m 644 -t $(DESTDIR)$(man8dir) $(PRG:%=%.8)
+	for x in $(PRG:%=%.8); do \
+		[ -f $$x ] && install -p -m 644 -t $(DESTDIR)$(man8dir) $$x ; \
+	done
 
 clean:
 	rm -f $(OBJECTS) $(DEPEND) $(PRG)

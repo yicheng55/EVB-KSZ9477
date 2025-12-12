@@ -19,18 +19,16 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <malloc.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-#include <asm/byteorder.h>
 
 #include "contain.h"
 #include "msg.h"
 #include "print.h"
 #include "tlv.h"
 
-#define VERSION_MASK 0x0f
-#define VERSION      0x02
+int assume_two_step = 0;
 
 /*
  * Head room fits a VLAN Ethernet header, and 'msg' is 64 bit aligned.
@@ -39,8 +37,8 @@
 
 struct message_storage {
 	unsigned char reserved[MSG_HEADROOM];
-	struct ptp_message msg;
-} PACKED;
+	struct ptp_message msg __attribute__((aligned (8)));
+};
 
 static TAILQ_HEAD(msg_pool, ptp_message) msg_pool = TAILQ_HEAD_INITIALIZER(msg_pool);
 
@@ -78,19 +76,9 @@ static void announce_post_recv(struct announce_msg *m)
 	m->stepsRemoved = ntohs(m->stepsRemoved);
 }
 
-int64_t host2net64(int64_t val)
-{
-	return __cpu_to_be64(val);
-}
-
-int64_t net2host64(int64_t val)
-{
-	return __be64_to_cpu(val);
-}
-
 static int hdr_post_recv(struct ptp_header *m)
 {
-	if ((m->ver & VERSION_MASK) != VERSION)
+	if ((m->ver & MAJOR_VERSION_MASK) != PTP_MAJOR_VERSION)
 		return -EPROTO;
 	m->messageLength = ntohs(m->messageLength);
 	m->correction = net2host64(m->correction);
@@ -108,6 +96,80 @@ static int hdr_pre_send(struct ptp_header *m)
 	return 0;
 }
 
+static uint8_t *msg_suffix(struct ptp_message *m)
+{
+	switch (msg_type(m)) {
+	case SYNC:
+		return m->sync.suffix;
+	case DELAY_REQ:
+		return m->delay_req.suffix;
+	case PDELAY_REQ:
+		return m->pdelay_req.suffix;
+	case PDELAY_RESP:
+		return m->pdelay_resp.suffix;
+	case FOLLOW_UP:
+		return m->follow_up.suffix;
+	case DELAY_RESP:
+		return m->delay_resp.suffix;
+	case PDELAY_RESP_FOLLOW_UP:
+		return m->pdelay_resp_fup.suffix;
+	case ANNOUNCE:
+		return m->announce.suffix;
+	case SIGNALING:
+		return m->signaling.suffix;
+	case MANAGEMENT:
+		return m->management.suffix;
+	}
+	return NULL;
+}
+
+static struct tlv_extra *msg_tlv_prepare(struct ptp_message *msg, int length)
+{
+	struct tlv_extra *extra, *tmp;
+	uint8_t *ptr;
+
+	/* Make sure this message type admits appended TLVs. */
+	ptr = msg_suffix(msg);
+	if (!ptr) {
+		pr_err("TLV on %s not allowed", msg_type_string(msg_type(msg)));
+		return NULL;
+	}
+	tmp = TAILQ_LAST(&msg->tlv_list, tlv_list);
+	if (tmp) {
+		ptr = (uint8_t *) tmp->tlv;
+		ptr += sizeof(tmp->tlv->type);
+		ptr += sizeof(tmp->tlv->length);
+		ptr += tmp->tlv->length;
+	}
+
+	/* Check that the message buffer has enough room for the new TLV. */
+	if ((unsigned long)(ptr + length) >
+	    (unsigned long)(&msg->tail_room)) {
+		pr_debug("cannot fit TLV of length %d into message", length);
+		return NULL;
+	}
+
+	/* Allocate a TLV descriptor and setup the pointer. */
+	extra = tlv_extra_alloc();
+	if (!extra) {
+		pr_err("failed to allocate TLV descriptor");
+		return NULL;
+	}
+	extra->tlv = (struct TLV *) ptr;
+
+	return extra;
+}
+
+static void msg_tlv_recycle(struct ptp_message *msg)
+{
+	struct tlv_extra *extra;
+
+	while ((extra = TAILQ_FIRST(&msg->tlv_list)) != NULL) {
+		TAILQ_REMOVE(&msg->tlv_list, extra, list);
+		tlv_extra_recycle(extra);
+	}
+}
+
 static void port_id_post_recv(struct PortIdentity *pid)
 {
 	pid->portNumber = ntohs(pid->portNumber);
@@ -118,54 +180,60 @@ static void port_id_pre_send(struct PortIdentity *pid)
 	pid->portNumber = htons(pid->portNumber);
 }
 
-static int suffix_post_recv(uint8_t *ptr, int len, struct tlv_extra *last)
+static int suffix_post_recv(struct ptp_message *msg, int len)
 {
-	int cnt, err;
-	struct TLV *tlv;
+	uint8_t *ptr = msg_suffix(msg);
+	struct tlv_extra *extra;
+	int err, suffix_len = 0;
 
 	if (!ptr)
 		return 0;
 
-	for (cnt = 0; len > sizeof(struct TLV); cnt++) {
-		tlv = (struct TLV *) ptr;
-		tlv->type = ntohs(tlv->type);
-		tlv->length = ntohs(tlv->length);
-		if (tlv->length % 2) {
+	while (len >= sizeof(struct TLV)) {
+		extra = tlv_extra_alloc();
+		if (!extra) {
+			pr_err("failed to allocate TLV descriptor");
+			return -ENOMEM;
+		}
+		extra->tlv = (struct TLV *) ptr;
+		extra->tlv->type = ntohs(extra->tlv->type);
+		extra->tlv->length = ntohs(extra->tlv->length);
+		if (extra->tlv->length % 2) {
+			tlv_extra_recycle(extra);
 			return -EBADMSG;
 		}
+		suffix_len += sizeof(struct TLV);
 		len -= sizeof(struct TLV);
 		ptr += sizeof(struct TLV);
-		if (tlv->length > len) {
-#ifdef KSZ_1588_PTP
-			tlv->length = len;
-#else
+		if (extra->tlv->length > len) {
+			tlv_extra_recycle(extra);
 			return -EBADMSG;
-#endif
 		}
-		len -= tlv->length;
-		ptr += tlv->length;
-		err = tlv_post_recv(tlv, len > sizeof(struct TLV) ? NULL : last);
-		if (err)
+		suffix_len += extra->tlv->length;
+		len -= extra->tlv->length;
+		ptr += extra->tlv->length;
+		err = tlv_post_recv(extra);
+		if (err) {
+			tlv_extra_recycle(extra);
 			return err;
+		}
+		msg_tlv_attach(msg, extra);
 	}
-	return cnt;
+	return suffix_len;
 }
 
-static void suffix_pre_send(uint8_t *ptr, int cnt, struct tlv_extra *last)
+static void suffix_pre_send(struct ptp_message *msg)
 {
-	int i;
+	struct tlv_extra *extra;
 	struct TLV *tlv;
 
-	if (!ptr)
-		return;
-
-	for (i = 0; i < cnt; i++) {
-		tlv = (struct TLV *) ptr;
-		tlv_pre_send(tlv, i == cnt - 1 ? last : NULL);
-		ptr += sizeof(struct TLV) + tlv->length;
+	TAILQ_FOREACH(extra, &msg->tlv_list, list) {
+		tlv = extra->tlv;
+		tlv_pre_send(tlv, extra);
 		tlv->type = htons(tlv->type);
 		tlv->length = htons(tlv->length);
 	}
+	msg_tlv_recycle(msg);
 }
 
 static void timestamp_post_recv(struct ptp_message *m, struct Timestamp *ts)
@@ -206,6 +274,7 @@ struct ptp_message *msg_allocate(void)
 	if (m) {
 		memset(m, 0, sizeof(*m));
 		m->refcnt = 1;
+		TAILQ_INIT(&m->tlv_list);
 	}
 
 	return m;
@@ -215,6 +284,9 @@ void msg_cleanup(void)
 {
 	struct message_storage *s;
 	struct ptp_message *m;
+
+	tlv_extra_cleanup();
+
 	while ((m = TAILQ_FIRST(&msg_pool)) != NULL) {
 		TAILQ_REMOVE(&msg_pool, m, list);
 		s = container_of(m, struct message_storage, msg);
@@ -225,9 +297,7 @@ void msg_cleanup(void)
 struct ptp_message *msg_duplicate(struct ptp_message *msg, int cnt)
 {
 	struct ptp_message *dup;
-#if 0
 	int err;
-#endif
 
 	dup = msg_allocate();
 	if (!dup) {
@@ -235,12 +305,8 @@ struct ptp_message *msg_duplicate(struct ptp_message *msg, int cnt)
 	}
 	memcpy(dup, msg, sizeof(*dup));
 	dup->refcnt = 1;
-#if 0
 	TAILQ_INIT(&dup->tlv_list);
-#endif
-	dup->tlv_count = 0;
 
-#if 0
 	err = msg_post_recv(dup, cnt);
 	if (err) {
 		switch (err) {
@@ -254,7 +320,6 @@ struct ptp_message *msg_duplicate(struct ptp_message *msg, int cnt)
 		msg_put(dup);
 		return NULL;
 	}
-#endif
 	if (msg_sots_missing(msg)) {
 		pr_err("msg_duplicate: received %s without timestamp",
 		       msg_type_string(msg_type(msg)));
@@ -272,8 +337,7 @@ void msg_get(struct ptp_message *m)
 
 int msg_post_recv(struct ptp_message *m, int cnt)
 {
-	int pdulen, type, err;
-	uint8_t *suffix = NULL;
+	int err, pdulen, suffix_len, type;
 
 	if (cnt < sizeof(struct ptp_header))
 		return -EBADMSG;
@@ -336,39 +400,35 @@ int msg_post_recv(struct ptp_message *m, int cnt)
 		break;
 	case FOLLOW_UP:
 		timestamp_post_recv(m, &m->follow_up.preciseOriginTimestamp);
-		suffix = m->follow_up.suffix;
 		break;
 	case DELAY_RESP:
 		timestamp_post_recv(m, &m->delay_resp.receiveTimestamp);
-		suffix = m->delay_resp.suffix;
+		port_id_post_recv(&m->delay_resp.requestingPortIdentity);
 		break;
 	case PDELAY_RESP_FOLLOW_UP:
 		timestamp_post_recv(m, &m->pdelay_resp_fup.responseOriginTimestamp);
 		port_id_post_recv(&m->pdelay_resp_fup.requestingPortIdentity);
-		suffix = m->pdelay_resp_fup.suffix;
 		break;
 	case ANNOUNCE:
 		clock_gettime(CLOCK_MONOTONIC, &m->ts.host);
 		timestamp_post_recv(m, &m->announce.originTimestamp);
 		announce_post_recv(&m->announce);
-		suffix = m->announce.suffix;
 		break;
 	case SIGNALING:
 		port_id_post_recv(&m->signaling.targetPortIdentity);
-		suffix = m->signaling.suffix;
 		break;
 	case MANAGEMENT:
 		port_id_post_recv(&m->management.targetPortIdentity);
-		suffix = m->management.suffix;
 		break;
 	}
 
-	if (msg_sots_missing(m))
-		return -ETIME;
-
-	m->tlv_count = suffix_post_recv(suffix, cnt - pdulen, &m->last_tlv);
-	if (m->tlv_count < 0)
-		return m->tlv_count;
+	suffix_len = suffix_post_recv(m, cnt - pdulen);
+	if (suffix_len < 0) {
+		return suffix_len;
+	}
+	if (pdulen + suffix_len != m->header.messageLength) {
+		return -EBADMSG;
+	}
 
 	return 0;
 }
@@ -376,7 +436,6 @@ int msg_post_recv(struct ptp_message *m, int cnt)
 int msg_pre_send(struct ptp_message *m)
 {
 	int type;
-	uint8_t *suffix = NULL;
 
 	if (hdr_pre_send(&m->header))
 		return -1;
@@ -387,6 +446,7 @@ int msg_pre_send(struct ptp_message *m)
 	case SYNC:
 		break;
 	case DELAY_REQ:
+		clock_gettime(CLOCK_MONOTONIC, &m->ts.host);
 		break;
 	case PDELAY_REQ:
 		break;
@@ -396,36 +456,60 @@ int msg_pre_send(struct ptp_message *m)
 		break;
 	case FOLLOW_UP:
 		timestamp_pre_send(&m->follow_up.preciseOriginTimestamp);
-		suffix = m->follow_up.suffix;
 		break;
 	case DELAY_RESP:
 		timestamp_pre_send(&m->delay_resp.receiveTimestamp);
 		m->delay_resp.requestingPortIdentity.portNumber =
 			htons(m->delay_resp.requestingPortIdentity.portNumber);
-		suffix = m->delay_resp.suffix;
 		break;
 	case PDELAY_RESP_FOLLOW_UP:
 		timestamp_pre_send(&m->pdelay_resp_fup.responseOriginTimestamp);
 		port_id_pre_send(&m->pdelay_resp_fup.requestingPortIdentity);
-		suffix = m->pdelay_resp_fup.suffix;
 		break;
 	case ANNOUNCE:
 		announce_pre_send(&m->announce);
-		suffix = m->announce.suffix;
 		break;
 	case SIGNALING:
 		port_id_pre_send(&m->signaling.targetPortIdentity);
-		suffix = m->signaling.suffix;
 		break;
 	case MANAGEMENT:
 		port_id_pre_send(&m->management.targetPortIdentity);
-		suffix = m->management.suffix;
 		break;
 	default:
 		return -1;
 	}
-	suffix_pre_send(suffix, m->tlv_count, &m->last_tlv);
+	suffix_pre_send(m);
 	return 0;
+}
+
+struct tlv_extra *msg_tlv_append(struct ptp_message *msg, int length)
+{
+	struct tlv_extra *extra;
+
+	extra = msg_tlv_prepare(msg, length);
+	if (extra) {
+		msg->header.messageLength += length;
+		msg_tlv_attach(msg, extra);
+	}
+	return extra;
+}
+
+void msg_tlv_attach(struct ptp_message *msg, struct tlv_extra *extra)
+{
+	TAILQ_INSERT_TAIL(&msg->tlv_list, extra, list);
+}
+
+int msg_tlv_count(struct ptp_message *msg)
+{
+	int count = 0;
+	struct tlv_extra *extra;
+
+	for (extra = TAILQ_FIRST(&msg->tlv_list);
+			extra != NULL;
+			extra = TAILQ_NEXT(extra, list))
+		count++;
+
+	return count;
 }
 
 const char *msg_type_string(int type)
@@ -492,11 +576,13 @@ void msg_print(struct ptp_message *m, FILE *fp)
 void msg_put(struct ptp_message *m)
 {
 	m->refcnt--;
-	if (!m->refcnt) {
-		pool_stats.count++;
-		pool_debug("recycle", m);
-		TAILQ_INSERT_HEAD(&msg_pool, m, list);
+	if (m->refcnt) {
+		return;
 	}
+	pool_stats.count++;
+	pool_debug("recycle", m);
+	msg_tlv_recycle(m);
+	TAILQ_INSERT_HEAD(&msg_pool, m, list);
 }
 
 int msg_sots_missing(struct ptp_message *m)

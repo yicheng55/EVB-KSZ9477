@@ -22,7 +22,13 @@
 
 #include <stdint.h>
 
-#define MAC_LEN 6
+#define EUI48 6
+#define EUI64 8
+
+#define MAC_LEN  EUI48
+#define GUID_LEN EUI64
+
+#define GUID_OFFSET 36
 
 typedef uint8_t eth_addr[MAC_LEN];
 
@@ -41,7 +47,5 @@ struct vlan_hdr {
 	uint16_t tci;
 	uint16_t type;
 } __attribute__((packed));
-
-#define OFF_ETYPE (2 * sizeof(eth_addr))
 
 #endif

@@ -26,22 +26,11 @@
 #include "ds.h"
 #include "dm.h"
 #include "filter.h"
+#include "interface.h"
+#include "mtab.h"
 #include "transport.h"
 #include "servo.h"
 #include "sk.h"
-
-#define MAX_IFNAME_SIZE 108 /* = UNIX_PATH_MAX */
-
-/** Defines a network interface, with PTP options. */
-struct interface {
-	STAILQ_ENTRY(interface) list;
-	char name[MAX_IFNAME_SIZE + 1];
-#ifdef KSZ_1588_PTP
-	char basename[MAX_IFNAME_SIZE + 1];
-	char devname[MAX_IFNAME_SIZE + 1];
-#endif
-	struct sk_ts_info ts_info;
-};
 
 struct config {
 	/* configured interfaces */
@@ -49,7 +38,6 @@ struct config {
 	int n_interfaces;
 #ifdef KSZ_1588_PTP
 	int no_auto_create;
-	int changed;
 #endif
 
 	/* for parsing command line options */
@@ -57,13 +45,13 @@ struct config {
 
 	/* hash of all non-legacy items */
 	struct hash *htab;
+
+	/* unicast master tables */
+	STAILQ_HEAD(ucmtab_head, unicast_master_table) unicast_master_tables;
 };
 
-int config_read(char *name, struct config *cfg);
-#ifdef KSZ_1588_PTP
-int config_write(char *name, struct config *cfg);
-#endif
-struct interface *config_create_interface(char *name, struct config *cfg);
+int config_read(const char *name, struct config *cfg);
+struct interface *config_create_interface(const char *name, struct config *cfg);
 void config_destroy(struct config *cfg);
 
 /* New, hash table based methods: */
@@ -78,6 +66,8 @@ int config_get_int(struct config *cfg, const char *section,
 
 char *config_get_string(struct config *cfg, const char *section,
 			const char *option);
+
+int config_harmonize_onestep(struct config *cfg);
 
 static inline struct option *config_long_options(struct config *cfg)
 {

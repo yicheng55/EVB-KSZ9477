@@ -19,13 +19,19 @@
 #ifndef HAVE_SERVO_PRIVATE_H
 #define HAVE_SERVO_PRIVATE_H
 
+#include <stdint.h>
+
 #include "contain.h"
+#include "servo.h"
 
 struct servo {
 	double max_frequency;
 	double step_threshold;
 	double first_step_threshold;
 	int first_update;
+	int64_t offset_threshold;
+	int num_offset_values;
+	int curr_offset_values;
 
 	void (*destroy)(struct servo *servo);
 

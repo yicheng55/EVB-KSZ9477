@@ -19,6 +19,9 @@
 
 #include <arpa/inet.h>
 
+#ifdef KSZ_1588_PTP
+#include "sk.h"
+#endif
 #include "transport.h"
 #include "transport_private.h"
 #include "raw.h"
@@ -28,18 +31,19 @@
 
 int transport_close(struct transport *t, struct fdarray *fda)
 {
+#ifdef KSZ_1588_PTP
+	sk_timestamping_close(fda->fd[FD_EVENT], interface_label(t->iface));
+#endif
 	return t->close(t, fda);
 }
 
-int transport_open(struct transport *t, const char *name,
+int transport_open(struct transport *t, struct interface *iface,
 		   struct fdarray *fda, enum timestamp_type tt)
 {
 #ifdef KSZ_1588_PTP
-	/* The name is stored in the port structure. */
-	t->name = name;
-	t->ts_type = tt;
+	t->iface = iface;
 #endif
-	return t->open(t, name, fda, tt);
+	return t->open(t, iface, fda, tt);
 }
 
 int transport_recv(struct transport *t, int fd, struct ptp_message *msg)
@@ -48,38 +52,46 @@ int transport_recv(struct transport *t, int fd, struct ptp_message *msg)
 }
 
 #ifdef KSZ_1588_PTP
-int transport_recv_err(struct transport *t, int fd, struct ptp_message *msg)
+#ifdef KSZ_1588_PTP_DELAYED_TX_TIMESTAMP
+int transport_rerr(struct transport *t, int fd, struct ptp_message *msg)
 {
-	return t->recv_err(t, fd, msg, sizeof(msg->data), &msg->address,
-		&msg->hwts);
+	return t->rerr(t, fd, msg, sizeof(msg->data), &msg->address, &msg->hwts);
 }
 #endif
 
-int transport_send(struct transport *t, struct fdarray *fda, int event,
-		   struct ptp_message *msg)
+#ifdef KSZ_1588_PTP_HW
+int transport_filt(struct transport *t, struct interface *iface, int fd, int rx_sync)
+{
+	return t->filt(t, iface, fd, rx_sync);
+}
+#endif
+#endif
+
+int transport_send(struct transport *t, struct fdarray *fda,
+		   enum transport_event event, struct ptp_message *msg)
 {
 	int len = ntohs(msg->header.messageLength);
 
 	return t->send(t, fda, event, 0, msg, len, NULL, &msg->hwts);
 }
 
-int transport_peer(struct transport *t, struct fdarray *fda, int event,
-		   struct ptp_message *msg)
+int transport_peer(struct transport *t, struct fdarray *fda,
+		   enum transport_event event, struct ptp_message *msg)
 {
 	int len = ntohs(msg->header.messageLength);
 
 	return t->send(t, fda, event, 1, msg, len, NULL, &msg->hwts);
 }
 
-int transport_sendto(struct transport *t, struct fdarray *fda, int event,
-		     struct ptp_message *msg)
+int transport_sendto(struct transport *t, struct fdarray *fda,
+		     enum transport_event event, struct ptp_message *msg)
 {
 	int len = ntohs(msg->header.messageLength);
 
 	return t->send(t, fda, event, 0, msg, len, &msg->address, &msg->hwts);
 }
 
-int transport_txts(struct transport *t, struct fdarray *fda,
+int transport_txts(struct fdarray *fda,
 		   struct ptp_message *msg)
 {
 	int cnt, len = ntohs(msg->header.messageLength);

@@ -57,11 +57,6 @@ struct foreign_clock {
 	 * in a form suitable for comparision in the BMCA.
 	 */
 	struct dataset dataset;
-#ifdef KSZ_1588_PTP
-	int bad_cnt;
-	int good_cnt;
-	int bad_master;
-#endif
 };
 
 #endif

@@ -20,10 +20,8 @@
 #ifndef HAVE_TC_H
 #define HAVE_TC_H
 
-#if 0
 #include "msg.h"
 #include "port_private.h"
-#endif
 
 /**
  * Flushes the list of remembered residence times.

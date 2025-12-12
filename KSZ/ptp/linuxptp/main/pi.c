@@ -19,23 +19,14 @@
  */
 #include <stdlib.h>
 #include <math.h>
-#ifdef KSZ_1588_PTP
-#include <stdio.h>
-#include "mave.h"
-#endif
 
 #include "config.h"
 #include "pi.h"
 #include "print.h"
 #include "servo_private.h"
 
-#ifdef KSZ_1588_PTP
-#define HWTS_KP_SCALE 0.5
-#define HWTS_KI_SCALE 0.1
-#else
 #define HWTS_KP_SCALE 0.7
 #define HWTS_KI_SCALE 0.3
-#endif
 #define SWTS_KP_SCALE 0.1
 #define SWTS_KI_SCALE 0.001
 
@@ -64,142 +55,10 @@ struct pi_servo {
 	double configured_pi_ki_norm_max;
 };
 
-#ifdef KSZ_1588_PTP
-struct std_dev_data {
-	double prev_avg;
-	double prev_dev;
-	double last_dev;
-	double max_avg;
-	double min_avg;
-	double max_dev;
-	double min_dev;
-	unsigned int dev_cnt;
-};
-
-static struct std_dev_data drift_dev;
-static struct std_dev_data dev_dev;
-static struct std_dev_data offset_dev;
-static struct filter *offset_avg;
-static tmv_t last_offset_avg;
-
-void reset_dev(struct std_dev_data *d)
-{
-	d->prev_avg = 0.0;
-	d->prev_dev = 0.0;
-	d->last_dev = 0.0;
-	d->dev_cnt = 0;
-	d->max_avg = 0.0;
-	d->min_avg = 6250000.0;
-	d->max_dev = 0.0;
-	d->min_dev = 100.0;
-}
-
-double running_dev(struct std_dev_data *d, double num)
-{
-	double avg;
-	double dev;
-
-	if (d->dev_cnt > 20000000) {
-		pr_info("dev = %lf, %lf", d->last_dev, d->prev_avg);
-		d->prev_dev = d->last_dev * d->last_dev * 2;
-		d->dev_cnt = 2;
-	}
-	d->dev_cnt++;
-	avg = d->prev_avg + (num - d->prev_avg) / d->dev_cnt;
-	dev = d->prev_dev + (num - d->prev_avg) * (num - avg);
-	d->prev_avg = avg;
-	d->prev_dev = dev;
-	d->last_dev = sqrt(dev / d->dev_cnt);
-	if (d->dev_cnt > 4) {
-		avg = fabs(avg);
-		if (avg > d->max_avg)
-			d->max_avg = avg;
-		if (avg < d->min_avg)
-			d->min_avg = avg;
-		if (d->last_dev > 0.01) {
-			if (d->last_dev > d->max_dev)
-				d->max_dev = d->last_dev;
-			if (d->last_dev < d->min_dev)
-				d->min_dev = d->last_dev;
-		}
-	}
-	return d->last_dev;
-}
-
-static void display_dev(struct std_dev_data *d, char *title)
-{
-	pr_info("%s:", title);
-	pr_info("dev = %lf, %lf", d->last_dev, d->prev_avg);
-	pr_info("min = %lf, %lf; max = %lf, %lf",
-		d->min_dev, d->min_avg, d->max_dev, d->max_avg);
-}
-
-static void save_interval(struct pi_servo *s, double offset, double local_ts)
-{
-	s->offset[0] = s->offset[1];
-	s->local[0] = s->local[1];
-	s->offset[1] = offset;
-	s->local[1] = local_ts;
-}
-
-static double check_offset(struct pi_servo *s, double offset, double local_ts)
-{
-	double interval;
-
-	save_interval(s, offset, local_ts);
-
-	/* Make sure last local time is valid. */
-	if (s->local[0] < 0)
-		return offset;
-
-	interval = s->local[1] - s->local[0];
-
-	/* Normalize offset if interval is greater than 0.8 second. */
-	if (interval > 800000000) {
-		offset *= 1000000000;
-		offset /= interval;
-	}
-	return offset;
-}
-
-static void check_dev(struct pi_servo *s, double offset, double ppb,
-	enum servo_state state)
-{
-	double dev;
-	static enum servo_state last_state;
-
-	if (s->count < 2 + 4)
-		return;
-
-	last_offset_avg = filter_sample(offset_avg, fabs(offset));
-	dev = running_dev(&offset_dev, offset);
-	dev = running_dev(&dev_dev, dev);
-	dev = running_dev(&drift_dev, ppb);
-
-	if (state != last_state) {
-		last_state = state;
-		if (SERVO_UNLOCKED == state) {
-			reset_dev(&offset_dev);
-			reset_dev(&dev_dev);
-			reset_dev(&drift_dev);
-			filter_reset(offset_avg);
-		}
-	}
-}
-#endif
-
 static void pi_destroy(struct servo *servo)
 {
 	struct pi_servo *s = container_of(servo, struct pi_servo, servo);
 	free(s);
-#ifdef KSZ_1588_PTP
-	pr_info(" ");
-	display_dev(&offset_dev, "offset");
-	display_dev(&dev_dev, "dev");
-	display_dev(&drift_dev, "drift");
-	pr_info("avg: %lld", last_offset_avg);
-	filter_destroy(offset_avg);
-#endif
 }
 
 static double pi_sample(struct servo *servo,
@@ -253,41 +112,26 @@ static double pi_sample(struct servo *servo,
 
 		if ((servo->first_update &&
 		     servo->first_step_threshold &&
-		     servo->first_step_threshold < fabs(offset)) ||
+		     servo->first_step_threshold < llabs(offset)) ||
 		    (servo->step_threshold &&
-		     servo->step_threshold < fabs(offset)))
+		     servo->step_threshold < llabs(offset)))
 			*state = SERVO_JUMP;
 		else
 			*state = SERVO_LOCKED;
 
 		ppb = s->drift;
 		s->count = 2;
-#ifdef KSZ_1588_PTP
-		running_dev(&drift_dev, s->drift);
-		if (*state == SERVO_JUMP) {
-			reset_dev(&drift_dev);
-			reset_dev(&offset_dev);
-			reset_dev(&dev_dev);
-			filter_reset(offset_avg);
-		}
-#endif
 		break;
 	case 2:
-#ifdef KSZ_1588_PTP
+#ifdef KSZ_1588_PTP_DELAYED_PATH_DELAY
 		/* Delay jump for E2E getting accurate path delay first. */
 		if (*state == SERVO_LOCKING) {
 			*state = SERVO_JUMP;
 			ppb = s->drift;
 			break;
-
-		/* There is still a big enough offset after jump. */
-		} else if (*state == SERVO_JUMP && abs(offset) >= 500 &&
-			   abs(offset) <= 1000) {
-			ppb = s->drift;
-			break;
 		}
-	default:
 #endif
+
 		/*
 		 * reset the clock servo when offset is greater than the max
 		 * offset value. Note that the clock jump will be performed in
@@ -296,15 +140,12 @@ static double pi_sample(struct servo *servo,
 		 * clock startup.
 		 */
 		if (servo->step_threshold &&
-		    servo->step_threshold < fabs(offset)) {
+		    servo->step_threshold < llabs(offset)) {
 			*state = SERVO_UNLOCKED;
 			s->count = 0;
 			break;
 		}
 
-#ifdef KSZ_1588_PTP
-		offset = check_offset(s, offset, local_ts);
-#endif
 		ki_term = s->ki * offset * weight;
 		ppb = s->kp * offset * weight + s->drift + ki_term;
 		if (ppb < -servo->max_frequency) {
@@ -315,11 +156,6 @@ static double pi_sample(struct servo *servo,
 			s->drift += ki_term;
 		}
 		*state = SERVO_LOCKED;
-#ifdef KSZ_1588_PTP
-		check_dev(s, offset, ppb, *state);
-		if (s->count < 2 + 5)
-			s->count++;
-#endif
 		break;
 	}
 
@@ -350,7 +186,7 @@ static void pi_reset(struct servo *servo)
 	s->count = 0;
 }
 
-struct servo *pi_servo_create(struct config *cfg, int fadj, int sw_ts)
+struct servo *pi_servo_create(struct config *cfg, double fadj, int sw_ts)
 {
 	struct pi_servo *s;
 
@@ -399,10 +235,6 @@ struct servo *pi_servo_create(struct config *cfg, int fadj, int sw_ts)
 			s->configured_pi_ki_scale = HWTS_KI_SCALE;
 		}
 	}
-
-#ifdef KSZ_1588_PTP
-	offset_avg = mave_create(32);
-#endif
 
 	return &s->servo;
 }

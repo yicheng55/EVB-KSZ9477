@@ -1,6 +1,6 @@
 /**
  * @file ptp4l.c
- * @brief PTP Boundary Clock main program
+ * @brief PTP Boundary Clock or Transparent Clock main program
  * @note Copyright (C) 2011 Richard Cochran <richardcochran@gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -36,8 +36,6 @@
 #include "util.h"
 #include "version.h"
 
-int assume_two_step = 0;
-
 static void usage(char *progname)
 {
 	fprintf(stderr,
@@ -58,9 +56,9 @@ static void usage(char *progname)
 		" -f [file] read configuration from 'file'\n"
 		" -i [dev]  interface device to use, for example 'eth0'\n"
 		"           (may be specified multiple times)\n"
-		" -p [dev]  PTP hardware clock device to use, default auto\n"
+		" -p [dev]  Clock device to use, default auto\n"
 		"           (ignored for SOFTWARE/LEGACY HW time stamping)\n"
-		" -s        slave only mode (overrides configuration file)\n"
+		" -s        client only synchronization mode (overrides configuration file)\n"
 		" -l [num]  set the logging level to 'num'\n"
 		" -m        print messages to stdout\n"
 		" -q        do not print messages to the syslog\n"
@@ -73,6 +71,7 @@ static void usage(char *progname)
 int main(int argc, char *argv[])
 {
 	char *config = NULL, *req_phc = NULL, *progname;
+	enum clock_type type = CLOCK_TYPE_ORDINARY;
 	int c, err = -1, index, print_level;
 	struct clock *clock = NULL;
 	struct option *opts;
@@ -81,7 +80,6 @@ int main(int argc, char *argv[])
 	char *config_save = NULL;
 	char dev_names[20];
 	int mports = 0;
-	int two_step = 0;
 	int vlan = 0;
 #endif
 
@@ -98,7 +96,7 @@ int main(int argc, char *argv[])
 	progname = strrchr(argv[0], '/');
 	progname = progname ? 1+progname : argv[0];
 #ifdef KSZ_1588_PTP
-	while (EOF != (c = getopt_long(argc, argv, "ABEPN246HSLRZf:i:p:sl:mn:o:qvh",
+	while (EOF != (c = getopt_long(argc, argv, "AEP246HSLf:i:p:sl:mn:qvh",
 #else
 	while (EOF != (c = getopt_long(argc, argv, "AEP246HSLf:i:p:sl:mqvh",
 #endif
@@ -120,15 +118,6 @@ int main(int argc, char *argv[])
 			if (config_set_int(cfg, "delay_mechanism", DM_P2P))
 				goto out;
 			break;
-#ifdef KSZ_1588_PTP
-		case 'B':
-			config_set_int(cfg, "transparent", 0);
-			break;
-		case 'N':
-			if (config_set_int(cfg, "delay_mechanism", DM_NONE))
-				goto out;
-			break;
-#endif
 		case '2':
 			if (config_set_int(cfg, "network_transport",
 					    TRANS_IEEE_802_3))
@@ -156,21 +145,6 @@ int main(int argc, char *argv[])
 			if (config_set_int(cfg, "time_stamping", TS_LEGACY_HW))
 				goto out;
 			break;
-#ifdef KSZ_1588_PTP
-		case 'R':
-			if (config_set_int(cfg, "c37_238", 1))
-				goto out;
-			vlan = 1;
-			break;
-		case 'Z':
-			if (config_set_int(cfg, "twoStepFlag", 1))
-				goto out;
-			two_step = 1;
-			break;
-		case 'n':
-			mports = atoi(optarg);
-			break;
-#endif
 		case 'f':
 #ifdef KSZ_1588_PTP
 			if (config) {
@@ -192,7 +166,7 @@ int main(int argc, char *argv[])
 			req_phc = optarg;
 			break;
 		case 's':
-			if (config_set_int(cfg, "slaveOnly", 1)) {
+			if (config_set_int(cfg, "clientOnly", 1)) {
 				goto out;
 			}
 			break;
@@ -205,6 +179,11 @@ int main(int argc, char *argv[])
 		case 'm':
 			config_set_int(cfg, "verbose", 1);
 			break;
+#ifdef KSZ_1588_PTP
+		case 'n':
+			mports = atoi(optarg);
+			break;
+#endif
 		case 'q':
 			config_set_int(cfg, "use_syslog", 0);
 			break;
@@ -225,12 +204,12 @@ int main(int argc, char *argv[])
 
 #ifdef KSZ_1588_PTP
 	if (mports > cfg->n_interfaces && cfg->n_interfaces == 1) {
-		int i;
+		char port_names[20];
+		char *dot2;
+		char *dot;
 		int lan;
 		int len;
-		char port_names[20];
-		char *dot;
-		char *dot2;
+		int i;
 
 		len = strlen(dev_names);
 		strcpy(port_names, dev_names);
@@ -259,17 +238,6 @@ int main(int argc, char *argv[])
 			if (!config_create_interface(dev_names, cfg))
 				break;
 		}
-
-		/* Create one final device for master clock operation. */
-		if (dot && config_get_int(cfg, NULL, "transparent")) {
-			dot--;
-			*dot = '\0';
-			if (dot2)
-				sprintf(dev_names, "%s%s", port_names, dot2);
-			else
-				sprintf(dev_names, "%s", port_names);
-			config_create_interface(dev_names, cfg);
-		}
 	}
 
 	/* Do not automatically create interface from configuration file. */
@@ -281,11 +249,7 @@ int main(int argc, char *argv[])
 		return c;
 	}
 #ifdef KSZ_1588_PTP
-	if (!config) {
-		/* Default clock is one-step. */
-		if (!two_step && config_set_int(cfg, "twoStepFlag", 0))
-			goto out;
-	} else if (config_save)
+	if (config_save)
 		c = config_read(config_save, cfg);
 #endif
 
@@ -298,6 +262,7 @@ int main(int argc, char *argv[])
 	assume_two_step = config_get_int(cfg, NULL, "assume_two_step");
 	sk_check_fupsync = config_get_int(cfg, NULL, "check_fup_sync");
 	sk_tx_timeout = config_get_int(cfg, NULL, "tx_timestamp_timeout");
+	sk_hwts_filter_mode = config_get_int(cfg, NULL, "hwts_filter");
 
 	if (config_get_int(cfg, NULL, "clock_servo") == CLOCK_SERVO_NTPSHM) {
 		config_set_int(cfg, "kernel_leap", 0);
@@ -310,8 +275,44 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
-	clock = clock_create(cfg->n_interfaces > 1 ? CLOCK_TYPE_BOUNDARY :
-			     CLOCK_TYPE_ORDINARY, cfg, req_phc);
+	type = config_get_int(cfg, NULL, "clock_type");
+	switch (type) {
+	case CLOCK_TYPE_ORDINARY:
+		if (cfg->n_interfaces > 1) {
+			type = CLOCK_TYPE_BOUNDARY;
+		}
+		break;
+	case CLOCK_TYPE_BOUNDARY:
+		if (cfg->n_interfaces < 2) {
+			fprintf(stderr, "BC needs at least two interfaces\n");
+			goto out;
+		}
+		break;
+	case CLOCK_TYPE_P2P:
+		if (cfg->n_interfaces < 2) {
+			fprintf(stderr, "TC needs at least two interfaces\n");
+			goto out;
+		}
+		if (DM_P2P != config_get_int(cfg, NULL, "delay_mechanism")) {
+			fprintf(stderr, "P2P_TC needs P2P delay mechanism\n");
+			goto out;
+		}
+		break;
+	case CLOCK_TYPE_E2E:
+		if (cfg->n_interfaces < 2) {
+			fprintf(stderr, "TC needs at least two interfaces\n");
+			goto out;
+		}
+		if (DM_E2E != config_get_int(cfg, NULL, "delay_mechanism")) {
+			fprintf(stderr, "E2E_TC needs E2E delay mechanism\n");
+			goto out;
+		}
+		break;
+	case CLOCK_TYPE_MANAGEMENT:
+		goto out;
+	}
+
+	clock = clock_create(type, cfg, req_phc);
 	if (!clock) {
 		fprintf(stderr, "failed to create a clock\n");
 		goto out;
@@ -323,10 +324,6 @@ int main(int argc, char *argv[])
 		if (clock_poll(clock))
 			break;
 	}
-#ifdef KSZ_1588_PTP
-	if (config_save && cfg->changed)
-		c = config_write(config_save, cfg);
-#endif
 out:
 	if (clock)
 		clock_destroy(clock);

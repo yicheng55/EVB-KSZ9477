@@ -31,8 +31,6 @@
 #include "transport_private.h"
 #include "uds.h"
 
-#define UDS_FILEMODE (S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP) /*0660*/
-
 struct uds {
 	struct transport t;
 	struct address address;
@@ -52,13 +50,17 @@ static int uds_close(struct transport *t, struct fdarray *fda)
 	return 0;
 }
 
-static int uds_open(struct transport *t, const char *name, struct fdarray *fda,
+static int uds_open(struct transport *t, struct interface *iface, struct fdarray *fda,
 		    enum timestamp_type tt)
 {
-	int fd, err;
-	struct sockaddr_un sa;
-	struct uds *uds = container_of(t, struct uds, t);
+	char *uds_ro_path = config_get_string(t->cfg, NULL, "uds_ro_address");
 	char *uds_path = config_get_string(t->cfg, NULL, "uds_address");
+	struct uds *uds = container_of(t, struct uds, t);
+	const char *name = interface_name(iface);
+	const char* file_mode_cfg;
+	struct sockaddr_un sa;
+	mode_t file_mode;
+	int fd, err;
 
 	fd = socket(AF_LOCAL, SOCK_DGRAM, 0);
 	if (fd < 0) {
@@ -78,6 +80,12 @@ static int uds_open(struct transport *t, const char *name, struct fdarray *fda,
 		return -1;
 	}
 
+	file_mode_cfg = "uds_file_mode";
+	// The RO UDS socket has a separate configuration for file mode
+	if (0 == strncmp(name, uds_ro_path, MAX_IFNAME_SIZE))
+		file_mode_cfg = "uds_ro_file_mode";
+	file_mode = (mode_t)config_get_int(t->cfg, name, file_mode_cfg);
+
 	/* For client use, pre load the server path. */
 	memset(&sa, 0, sizeof(sa));
 	sa.sun_family = AF_LOCAL;
@@ -85,7 +93,7 @@ static int uds_open(struct transport *t, const char *name, struct fdarray *fda,
 	uds->address.sun = sa;
 	uds->address.len = sizeof(sa);
 
-	chmod(name, UDS_FILEMODE);
+	chmod(name, file_mode);
 	fda->fd[FD_EVENT] = -1;
 	fda->fd[FD_GENERAL] = fd;
 	return 0;
@@ -107,9 +115,9 @@ static int uds_recv(struct transport *t, int fd, void *buf, int buflen,
 	return cnt;
 }
 
-static int uds_send(struct transport *t, struct fdarray *fda, int event,
-		    int peer, void *buf, int buflen, struct address *addr,
-		    struct hw_timestamp *hwts)
+static int uds_send(struct transport *t, struct fdarray *fda,
+		    enum transport_event event, int peer, void *buf, int buflen,
+		    struct address *addr, struct hw_timestamp *hwts)
 {
 	int cnt, fd = fda->fd[FD_GENERAL];
 	struct uds *uds = container_of(t, struct uds, t);
@@ -118,8 +126,8 @@ static int uds_send(struct transport *t, struct fdarray *fda, int event,
 		addr = &uds->address;
 
 	cnt = sendto(fd, buf, buflen, 0, &addr->sa, addr->len);
-	if (cnt <= 0 && errno != ECONNREFUSED) {
-		pr_err("uds: sendto failed: %m");
+	if (cnt < 1) {
+		return -errno;
 	}
 	return cnt;
 }
@@ -143,4 +151,3 @@ struct transport *uds_transport_create(void)
 	uds->t.release = uds_release;
 	return &uds->t;
 }
-

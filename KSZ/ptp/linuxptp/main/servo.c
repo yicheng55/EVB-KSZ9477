@@ -17,18 +17,22 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #include <string.h>
+#include <stdlib.h>
 
 #include "config.h"
 #include "linreg.h"
 #include "ntpshm.h"
 #include "nullf.h"
 #include "pi.h"
+#include "refclock_sock.h"
 #include "servo_private.h"
+
+#include "print.h"
 
 #define NSEC_PER_SEC 1000000000
 
 struct servo *servo_create(struct config *cfg, enum servo_type type,
-			   int fadj, int max_ppb, int sw_ts)
+			   double fadj, int max_ppb, int sw_ts)
 {
 	double servo_first_step_threshold;
 	double servo_step_threshold;
@@ -47,6 +51,9 @@ struct servo *servo_create(struct config *cfg, enum servo_type type,
 		break;
 	case CLOCK_SERVO_NULLF:
 		servo = nullf_servo_create();
+		break;
+	case CLOCK_SERVO_REFCLOCK_SOCK:
+		servo = refclock_sock_servo_create(cfg);
 		break;
 	default:
 		return NULL;
@@ -79,6 +86,9 @@ struct servo *servo_create(struct config *cfg, enum servo_type type,
 	}
 
 	servo->first_update = 1;
+	servo->offset_threshold = config_get_int(cfg, NULL, "servo_offset_threshold");
+	servo->num_offset_values = config_get_int(cfg, NULL, "servo_num_offset_values");
+	servo->curr_offset_values = servo->num_offset_values;
 
 	return servo;
 }
@@ -86,6 +96,22 @@ struct servo *servo_create(struct config *cfg, enum servo_type type,
 void servo_destroy(struct servo *servo)
 {
 	servo->destroy(servo);
+}
+
+static int check_offset_threshold(struct servo *s, int64_t offset)
+{
+	long long int abs_offset = llabs(offset);
+
+	if (s->offset_threshold) {
+		if (abs_offset < s->offset_threshold) {
+			if (s->curr_offset_values)
+				s->curr_offset_values--;
+		} else {
+			s->curr_offset_values = s->num_offset_values;
+		}
+		return s->curr_offset_values ? 0 : 1;
+	}
+	return 0;
 }
 
 double servo_sample(struct servo *servo,
@@ -98,8 +124,28 @@ double servo_sample(struct servo *servo,
 
 	r = servo->sample(servo, offset, local_ts, weight, state);
 
-	if (*state != SERVO_UNLOCKED)
+	switch (*state) {
+	case SERVO_UNLOCKED:
+		servo->curr_offset_values = servo->num_offset_values;
+		break;
+	case SERVO_JUMP:
+		servo->curr_offset_values = servo->num_offset_values;
 		servo->first_update = 0;
+		break;
+	case SERVO_LOCKED:
+		if (check_offset_threshold(servo, offset)) {
+			*state = SERVO_LOCKED_STABLE;
+		}
+		servo->first_update = 0;
+		break;
+	case SERVO_LOCKED_STABLE:
+		/*
+		 * This case will never occur since the only place
+		 * SERVO_LOCKED_STABLE is set is in this switch/case block
+		 * (case SERVO_LOCKED).
+		 */
+		break;
+	}
 
 	return r;
 }
@@ -126,4 +172,9 @@ void servo_leap(struct servo *servo, int leap)
 {
 	if (servo->leap)
 		servo->leap(servo, leap);
+}
+
+int servo_offset_threshold(struct servo *servo)
+{
+	return servo->offset_threshold;
 }

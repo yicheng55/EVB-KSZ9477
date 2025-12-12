@@ -39,14 +39,19 @@
 
 #define EVENT_PORT        319
 #define GENERAL_PORT      320
+
+/* The 0x0e in second byte is substituted with udp6_scope at runtime. */
 #define PTP_PRIMARY_MCAST_IP6ADDR "FF0E:0:0:0:0:0:0:181"
 #define PTP_PDELAY_MCAST_IP6ADDR  "FF02:0:0:0:0:0:0:6B"
+
+enum { MC_PRIMARY, MC_PDELAY };
 
 struct udp6 {
 	struct transport t;
 	int index;
 	struct address ip;
 	struct address mac;
+	struct in6_addr mc6_addr[2];
 };
 
 static int is_link_local(struct in6_addr *addr)
@@ -68,11 +73,10 @@ static int mc_bind(int fd, int index)
 	return 0;
 }
 
-static int mc_join(int fd, int index, const struct sockaddr *grp, socklen_t grplen)
+static int mc_join(int fd, int index, const struct sockaddr_in6 *sa)
 {
 	int err, off = 0;
 	struct ipv6_mreq req;
-	struct sockaddr_in6 *sa = (struct sockaddr_in6 *) grp;
 
 	memset(&req, 0, sizeof(req));
 	memcpy(&req.ipv6mr_multiaddr, &sa->sin6_addr, sizeof(struct in6_addr));
@@ -92,9 +96,6 @@ static int mc_join(int fd, int index, const struct sockaddr *grp, socklen_t grpl
 
 static int udp6_close(struct transport *t, struct fdarray *fda)
 {
-#ifdef KSZ_1588_PTP
-	sk_timestamping_close(fda->fd[FD_EVENT], t->name, t->ts_type);
-#endif
 	close(fda->fd[0]);
 	close(fda->fd[1]);
 	return 0;
@@ -140,12 +141,12 @@ static int open_socket_ipv6(const char *name, struct in6_addr mc_addr[2], short 
 		goto no_option;
 	}
 	addr.sin6_addr = mc_addr[0];
-	if (mc_join(fd, index, (struct sockaddr *) &addr, sizeof(addr))) {
+	if (mc_join(fd, index, &addr)) {
 		pr_err("mcast_join failed");
 		goto no_option;
 	}
 	addr.sin6_addr = mc_addr[1];
-	if (mc_join(fd, index, (struct sockaddr *) &addr, sizeof(addr))) {
+	if (mc_join(fd, index, &addr)) {
 		pr_err("mcast_join failed");
 		goto no_option;
 	}
@@ -159,14 +160,11 @@ no_socket:
 	return -1;
 }
 
-enum { MC_PRIMARY, MC_PDELAY };
-
-static struct in6_addr mc6_addr[2];
-
-static int udp6_open(struct transport *t, const char *name, struct fdarray *fda,
-		    enum timestamp_type ts_type)
+static int udp6_open(struct transport *t, struct interface *iface,
+		     struct fdarray *fda, enum timestamp_type ts_type)
 {
 	struct udp6 *udp6 = container_of(t, struct udp6, t);
+	const char *name = interface_name(iface);
 	uint8_t event_dscp, general_dscp;
 	int efd, gfd, hop_limit;
 
@@ -177,23 +175,29 @@ static int udp6_open(struct transport *t, const char *name, struct fdarray *fda,
 	udp6->ip.len = 0;
 	sk_interface_addr(name, AF_INET6, &udp6->ip);
 
-	if (1 != inet_pton(AF_INET6, PTP_PRIMARY_MCAST_IP6ADDR, &mc6_addr[MC_PRIMARY]))
+	if (1 != inet_pton(AF_INET6, PTP_PRIMARY_MCAST_IP6ADDR,
+			   &udp6->mc6_addr[MC_PRIMARY]))
 		return -1;
 
-	mc6_addr[MC_PRIMARY].s6_addr[1] = config_get_int(t->cfg, name, "udp6_scope");
+	udp6->mc6_addr[MC_PRIMARY].s6_addr[1] = config_get_int(t->cfg, name,
+							       "udp6_scope");
 
-	if (1 != inet_pton(AF_INET6, PTP_PDELAY_MCAST_IP6ADDR, &mc6_addr[MC_PDELAY]))
+	if (1 != inet_pton(AF_INET6, PTP_PDELAY_MCAST_IP6ADDR,
+			   &udp6->mc6_addr[MC_PDELAY]))
 		return -1;
 
-	efd = open_socket_ipv6(name, mc6_addr, EVENT_PORT, &udp6->index, hop_limit);
+	efd = open_socket_ipv6(name, udp6->mc6_addr, EVENT_PORT, &udp6->index,
+			       hop_limit);
 	if (efd < 0)
 		goto no_event;
 
-	gfd = open_socket_ipv6(name, mc6_addr, GENERAL_PORT, &udp6->index, hop_limit);
+	gfd = open_socket_ipv6(name, udp6->mc6_addr, GENERAL_PORT, &udp6->index,
+			       hop_limit);
 	if (gfd < 0)
 		goto no_general;
 
-	if (sk_timestamping_init(efd, name, ts_type, TRANS_UDP_IPV6))
+	if (sk_timestamping_init(efd, interface_label(iface), ts_type,
+				 TRANS_UDP_IPV6, interface_get_vclock(iface)))
 		goto no_timestamping;
 
 	if (sk_general_init(gfd))
@@ -202,10 +206,10 @@ static int udp6_open(struct transport *t, const char *name, struct fdarray *fda,
 	event_dscp = config_get_int(t->cfg, NULL, "dscp_event");
 	general_dscp = config_get_int(t->cfg, NULL, "dscp_general");
 
-	if (event_dscp && sk_set_priority(efd, event_dscp)) {
+	if (event_dscp && sk_set_priority(efd, AF_INET6, event_dscp)) {
 		pr_warning("Failed to set event DSCP priority.");
 	}
-	if (general_dscp && sk_set_priority(gfd, general_dscp)) {
+	if (general_dscp && sk_set_priority(gfd, AF_INET6, general_dscp)) {
 		pr_warning("Failed to set general DSCP priority.");
 	}
 
@@ -224,39 +228,54 @@ no_event:
 static int udp6_recv(struct transport *t, int fd, void *buf, int buflen,
 		     struct address *addr, struct hw_timestamp *hwts)
 {
-	return sk_receive(fd, buf, buflen, addr, hwts, 0);
+	return sk_receive(fd, buf, buflen, addr, hwts, MSG_DONTWAIT);
 }
 
 #ifdef KSZ_1588_PTP
-static int udp6_recv_err(struct transport *t, int fd, void *buf, int buflen,
-			 struct address *addr, struct hw_timestamp *hwts)
+#ifdef KSZ_1588_PTP_DELAYED_TX_TIMESTAMP
+static int udp6_rerr(struct transport *t, int fd, void *buf, int buflen,
+		     struct address *addr, struct hw_timestamp *hwts)
 {
-	ssize_t cnt;
-	unsigned char junk[1600];
-
-	cnt = sk_receive(fd, junk, sizeof(junk), addr, hwts, MSG_ERRQUEUE);
-	if (buflen < cnt)
-		cnt= buflen;
-	memcpy(buf, junk, cnt);
-	return cnt;
+	return sk_receive(fd, buf, buflen, addr, hwts, MSG_ERRQUEUE);
 }
 #endif
 
-static int udp6_send(struct transport *t, struct fdarray *fda, int event,
-		    int peer, void *buf, int len, struct address *addr,
-		    struct hw_timestamp *hwts)
+#ifdef KSZ_1588_PTP_HW
+static int udp6_filt(struct transport *t, struct interface *iface, int fd,
+		     int rx_sync)
+{
+	return sk_timestamping_filt(fd, interface_label(iface), rx_sync);
+}
+#endif
+#endif
+
+static int udp6_send(struct transport *t, struct fdarray *fda,
+		     enum transport_event event, int peer, void *buf, int len,
+		     struct address *addr, struct hw_timestamp *hwts)
 {
 	struct udp6 *udp6 = container_of(t, struct udp6, t);
-	ssize_t cnt;
-	int fd = event ? fda->fd[FD_EVENT] : fda->fd[FD_GENERAL];
 	struct address addr_buf;
 	unsigned char junk[1600];
+	ssize_t cnt;
+	int fd = -1;
+
+	switch (event) {
+	case TRANS_GENERAL:
+		fd = fda->fd[FD_GENERAL];
+		break;
+	case TRANS_EVENT:
+	case TRANS_ONESTEP:
+	case TRANS_P2P1STEP:
+	case TRANS_DEFER_EVENT:
+		fd = fda->fd[FD_EVENT];
+		break;
+	}
 
 	if (!addr) {
 		memset(&addr_buf, 0, sizeof(addr_buf));
 		addr_buf.sin6.sin6_family = AF_INET6;
-		addr_buf.sin6.sin6_addr =  peer ? mc6_addr[MC_PDELAY] :
-						  mc6_addr[MC_PRIMARY];
+		addr_buf.sin6.sin6_addr =  peer ? udp6->mc6_addr[MC_PDELAY] :
+						  udp6->mc6_addr[MC_PRIMARY];
 		if (is_link_local(&addr_buf.sin6.sin6_addr))
 			addr_buf.sin6.sin6_scope_id = udp6->index;
 
@@ -271,20 +290,12 @@ static int udp6_send(struct transport *t, struct fdarray *fda, int event,
 	cnt = sendto(fd, buf, len, 0, &addr->sa, sizeof(addr->sin6));
 	if (cnt < 1) {
 		pr_err("sendto failed: %m");
-		return cnt;
+		return -errno;
 	}
-#ifdef KSZ_1588_PTP
-	if (hwts)
-		memset(&hwts->ts, 0, sizeof(hwts->ts));
-	if (event == TRANS_EVENT)
-		sk_receive(fd, junk, len, NULL, hwts, MSG_ERRQUEUE);
-	return cnt;
-#else
 	/*
 	 * Get the time stamp right away.
 	 */
 	return event == TRANS_EVENT ? sk_receive(fd, junk, len, NULL, hwts, MSG_ERRQUEUE) : cnt;
-#endif
 }
 
 static void udp6_release(struct transport *t)
@@ -327,7 +338,12 @@ struct transport *udp6_transport_create(void)
 	udp6->t.open    = udp6_open;
 	udp6->t.recv    = udp6_recv;
 #ifdef KSZ_1588_PTP
-	udp6->t.recv_err = udp6_recv_err;
+#ifdef KSZ_1588_PTP_DELAYED_TX_TIMESTAMP
+	udp6->t.rerr    = udp6_rerr;
+#endif
+#ifdef KSZ_1588_PTP_HW
+	udp6->t.filt    = udp6_filt;
+#endif
 #endif
 	udp6->t.send    = udp6_send;
 	udp6->t.release = udp6_release;

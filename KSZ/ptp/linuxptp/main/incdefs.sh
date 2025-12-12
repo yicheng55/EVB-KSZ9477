@@ -82,6 +82,14 @@ kernel_flags()
 	if grep -q HWTSTAMP_TX_ONESTEP_SYNC ${prefix}${tstamp}; then
 		printf " -DHAVE_ONESTEP_SYNC"
 	fi
+
+	if grep -q HWTSTAMP_TX_ONESTEP_P2P ${prefix}${tstamp}; then
+		printf " -DHAVE_ONESTEP_P2P"
+	fi
+
+	if grep -q SOF_TIMESTAMPING_BIND_PHC ${prefix}${tstamp}; then
+		printf " -DHAVE_VCLOCKS"
+	fi
 }
 
 flags="$(user_flags)$(kernel_flags)"

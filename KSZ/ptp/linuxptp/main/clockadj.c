@@ -17,7 +17,9 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+#include <errno.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -46,7 +48,7 @@ void clockadj_init(clockid_t clkid)
 #endif
 }
 
-void clockadj_set_freq(clockid_t clkid, double freq)
+int clockadj_set_freq(clockid_t clkid, double freq)
 {
 	struct timex tx;
 	memset(&tx, 0, sizeof(tx));
@@ -60,8 +62,11 @@ void clockadj_set_freq(clockid_t clkid, double freq)
 
 	tx.modes |= ADJ_FREQUENCY;
 	tx.freq = (long) (freq * 65.536);
-	if (clock_adjtime(clkid, &tx) < 0)
+	if (clock_adjtime(clkid, &tx) < 0) {
 		pr_err("failed to adjust the clock: %m");
+		return -1;
+	}
+	return 0;
 }
 
 double clockadj_get_freq(clockid_t clkid)
@@ -71,15 +76,30 @@ double clockadj_get_freq(clockid_t clkid)
 	memset(&tx, 0, sizeof(tx));
 	if (clock_adjtime(clkid, &tx) < 0) {
 		pr_err("failed to read out the clock frequency adjustment: %m");
+		exit(1);
 	} else {
 		f = tx.freq / 65.536;
-		if (clkid == CLOCK_REALTIME && realtime_nominal_tick)
+		if (clkid == CLOCK_REALTIME && realtime_nominal_tick && tx.tick)
 			f += 1e3 * realtime_hz * (tx.tick - realtime_nominal_tick);
 	}
 	return f;
 }
 
-void clockadj_step(clockid_t clkid, int64_t step)
+int clockadj_set_phase(clockid_t clkid, long offset)
+{
+	struct timex tx;
+	memset(&tx, 0, sizeof(tx));
+
+	tx.modes = ADJ_OFFSET | ADJ_NANO;
+	tx.offset = offset;
+	if (clock_adjtime(clkid, &tx) < 0) {
+		pr_err("failed to set the clock offset: %m");
+		return -1;
+	}
+	return 0;
+}
+
+int clockadj_step(clockid_t clkid, int64_t step)
 {
 	struct timex tx;
 	int sign = 1;
@@ -99,8 +119,66 @@ void clockadj_step(clockid_t clkid, int64_t step)
 		tx.time.tv_sec  -= 1;
 		tx.time.tv_usec += 1000000000;
 	}
-	if (clock_adjtime(clkid, &tx) < 0)
+	if (clock_adjtime(clkid, &tx) < 0) {
 		pr_err("failed to step clock: %m");
+		return -1;
+	}
+	return 0;
+}
+
+int clockadj_max_freq(clockid_t clkid)
+{
+	int f = 0;
+	struct timex tx;
+
+	memset(&tx, 0, sizeof(tx));
+	if (clock_adjtime(clkid, &tx) < 0)
+		pr_err("failed to read out the clock maximum adjustment: %m");
+	else
+		f = tx.tolerance / 65.536;
+	if (!f)
+		f = 500000;
+
+	/* The kernel allows the tick length to be adjusted up to 10%. But use
+	 * it only if the overall frequency of the clock can be adjusted
+	 * continuously with the tick and freq fields (i.e. hz <= 1000).
+	 */
+	if (clkid == CLOCK_REALTIME && (realtime_nominal_tick && 2 * f >=
+					1000 * realtime_hz))
+		f = realtime_nominal_tick / 10 * 1000 * realtime_hz;
+
+	return f;
+}
+
+int clockadj_compare(clockid_t clkid, clockid_t sysclk, int readings,
+		     int64_t *offset, uint64_t *ts, int64_t *delay)
+{
+	struct timespec tdst1, tdst2, tsrc;
+	int i;
+	int64_t interval, best_interval = INT64_MAX;
+
+	/* Pick the quickest clkid reading. */
+	for (i = 0; i < readings; i++) {
+		if (clock_gettime(sysclk, &tdst1) ||
+				clock_gettime(clkid, &tsrc) ||
+				clock_gettime(sysclk, &tdst2)) {
+			pr_err("failed to read clock: %m");
+			return -errno;
+		}
+
+		interval = (tdst2.tv_sec - tdst1.tv_sec) * NS_PER_SEC +
+			tdst2.tv_nsec - tdst1.tv_nsec;
+
+		if (best_interval > interval) {
+			best_interval = interval;
+			*offset = (tdst1.tv_sec - tsrc.tv_sec) * NS_PER_SEC +
+				tdst1.tv_nsec - tsrc.tv_nsec + interval / 2;
+			*ts = tdst2.tv_sec * NS_PER_SEC + tdst2.tv_nsec;
+		}
+	}
+	*delay = best_interval;
+
+	return 0;
 }
 
 void sysclk_set_leap(int leap)
@@ -142,24 +220,7 @@ void sysclk_set_tai_offset(int offset)
 
 int sysclk_max_freq(void)
 {
-	clockid_t clkid = CLOCK_REALTIME;
-	int f = 0;
-	struct timex tx;
-	memset(&tx, 0, sizeof(tx));
-	if (clock_adjtime(clkid, &tx) < 0)
-		pr_err("failed to read out the clock maximum adjustment: %m");
-	else
-		f = tx.tolerance / 65.536;
-	if (!f)
-		f = 500000;
-
-	/* The kernel allows the tick length to be adjusted up to 10%. But use
-	   it only if the overall frequency of the clock can be adjusted
-	   continuously with the tick and freq fields (i.e. hz <= 1000). */
-	if (realtime_nominal_tick && 2 * f >= 1000 * realtime_hz)
-		f = realtime_nominal_tick / 10 * 1000 * realtime_hz;
-
-	return f;
+	return clockadj_max_freq(CLOCK_REALTIME);
 }
 
 void sysclk_set_sync(void)

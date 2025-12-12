@@ -18,14 +18,22 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #include <errno.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
 
+#include "notification.h"
 #include "print.h"
 #include "tlv.h"
 #include "transport.h"
-#include "util.h"
 #include "pmc_common.h"
+#include "power_profile.h"
+
+#define BAD_ACTION   -1
+#define BAD_ID       -1
+#define AMBIGUOUS_ID -2
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 /*
    Field                  Len  Type
@@ -47,6 +55,416 @@
 #define EMPTY_CLOCK_DESCRIPTION 22
 /* Includes one extra byte to make length even. */
 #define EMPTY_PTP_TEXT 2
+/* Field                  Len  Type
+ * -------------------------------------------------------
+ * portIdentity          10    UInteger16 + 8 * Octets
+ * port_state             1    uint8_t
+ * timestamping           1    uint8_t
+ * interface              1    PTPText
+ * extra                  1    make length even
+ * -------------------------------------------------------
+ * TOTAL                 14
+ */
+#define EMPTY_PORT_PROPERTIES_NP 14
+/* Field                  Len  Type
+ * -------------------------------------------------------
+ * actualTableSize        2    UInteger16
+ * unicast_masters        0    Zero length array
+ * -------------------------------------------------------
+ * TOTAL                  2
+ */
+#define EMPTY_UNICAST_MASTER_TABLE_NP 2
+
+static void do_get_action(struct pmc *pmc, int action, int index, char *str);
+static void do_set_action(struct pmc *pmc, int action, int index, char *str);
+static void not_supported(struct pmc *pmc, int action, int index, char *str);
+static void null_management(struct pmc *pmc, int action, int index, char *str);
+
+static const char *action_string[] = {
+	"GET",
+	"SET",
+	"RESPONSE",
+	"COMMAND",
+	"ACKNOWLEDGE",
+};
+
+struct management_id {
+	char name[64];
+	int code;
+	void (*func)(struct pmc *pmc, int action, int index, char *str);
+};
+
+struct management_id idtab[] = {
+/* Clock management ID values */
+	{ "USER_DESCRIPTION", MID_USER_DESCRIPTION, do_get_action },
+	{ "SAVE_IN_NON_VOLATILE_STORAGE", MID_SAVE_IN_NON_VOLATILE_STORAGE, not_supported },
+	{ "RESET_NON_VOLATILE_STORAGE", MID_RESET_NON_VOLATILE_STORAGE, not_supported },
+	{ "INITIALIZE", MID_INITIALIZE, not_supported },
+	{ "FAULT_LOG", MID_FAULT_LOG, not_supported },
+	{ "FAULT_LOG_RESET", MID_FAULT_LOG_RESET, not_supported },
+	{ "DEFAULT_DATA_SET", MID_DEFAULT_DATA_SET, do_get_action },
+	{ "CURRENT_DATA_SET", MID_CURRENT_DATA_SET, do_get_action },
+	{ "PARENT_DATA_SET", MID_PARENT_DATA_SET, do_get_action },
+	{ "TIME_PROPERTIES_DATA_SET", MID_TIME_PROPERTIES_DATA_SET, do_get_action },
+	{ "PRIORITY1", MID_PRIORITY1, do_set_action },
+	{ "PRIORITY2", MID_PRIORITY2, do_set_action },
+	{ "DOMAIN", MID_DOMAIN, do_get_action },
+	{ "SLAVE_ONLY", MID_SLAVE_ONLY, do_get_action },
+	{ "TIME", MID_TIME, not_supported },
+	{ "CLOCK_ACCURACY", MID_CLOCK_ACCURACY, do_get_action },
+	{ "UTC_PROPERTIES", MID_UTC_PROPERTIES, not_supported },
+	{ "TRACEABILITY_PROPERTIES", MID_TRACEABILITY_PROPERTIES, do_get_action },
+	{ "TIMESCALE_PROPERTIES", MID_TIMESCALE_PROPERTIES, do_get_action },
+	{ "PATH_TRACE_LIST", MID_PATH_TRACE_LIST, not_supported },
+	{ "PATH_TRACE_ENABLE", MID_PATH_TRACE_ENABLE, not_supported },
+	{ "GRANDMASTER_CLUSTER_TABLE", MID_GRANDMASTER_CLUSTER_TABLE, not_supported },
+	{ "ACCEPTABLE_MASTER_TABLE", MID_ACCEPTABLE_MASTER_TABLE, not_supported },
+	{ "ACCEPTABLE_MASTER_MAX_TABLE_SIZE", MID_ACCEPTABLE_MASTER_MAX_TABLE_SIZE, not_supported },
+	{ "ALTERNATE_TIME_OFFSET_ENABLE", MID_ALTERNATE_TIME_OFFSET_ENABLE, do_set_action },
+	{ "ALTERNATE_TIME_OFFSET_NAME", MID_ALTERNATE_TIME_OFFSET_NAME, do_set_action },
+	{ "ALTERNATE_TIME_OFFSET_MAX_KEY", MID_ALTERNATE_TIME_OFFSET_MAX_KEY, not_supported },
+	{ "ALTERNATE_TIME_OFFSET_PROPERTIES", MID_ALTERNATE_TIME_OFFSET_PROPERTIES, do_set_action },
+	{ "MASTER_ONLY", MID_MASTER_ONLY, do_get_action },
+	{ "TRANSPARENT_CLOCK_DEFAULT_DATA_SET", MID_TRANSPARENT_CLOCK_DEFAULT_DATA_SET, not_supported },
+	{ "PRIMARY_DOMAIN", MID_PRIMARY_DOMAIN, not_supported },
+	{ "TIME_STATUS_NP", MID_TIME_STATUS_NP, do_get_action },
+	{ "GRANDMASTER_SETTINGS_NP", MID_GRANDMASTER_SETTINGS_NP, do_set_action },
+	{ "SUBSCRIBE_EVENTS_NP", MID_SUBSCRIBE_EVENTS_NP, do_set_action },
+	{ "SYNCHRONIZATION_UNCERTAIN_NP", MID_SYNCHRONIZATION_UNCERTAIN_NP, do_set_action },
+/* Port management ID values */
+	{ "NULL_MANAGEMENT", MID_NULL_MANAGEMENT, null_management },
+	{ "CLOCK_DESCRIPTION", MID_CLOCK_DESCRIPTION, do_get_action },
+	{ "PORT_DATA_SET", MID_PORT_DATA_SET, do_get_action },
+	{ "LOG_ANNOUNCE_INTERVAL", MID_LOG_ANNOUNCE_INTERVAL, do_get_action },
+	{ "ANNOUNCE_RECEIPT_TIMEOUT", MID_ANNOUNCE_RECEIPT_TIMEOUT, do_get_action },
+	{ "LOG_SYNC_INTERVAL", MID_LOG_SYNC_INTERVAL, do_get_action },
+	{ "VERSION_NUMBER", MID_VERSION_NUMBER, do_get_action },
+	{ "ENABLE_PORT", MID_ENABLE_PORT, not_supported },
+	{ "DISABLE_PORT", MID_DISABLE_PORT, not_supported },
+	{ "UNICAST_NEGOTIATION_ENABLE", MID_UNICAST_NEGOTIATION_ENABLE, not_supported },
+	{ "UNICAST_MASTER_TABLE", MID_UNICAST_MASTER_TABLE, not_supported },
+	{ "UNICAST_MASTER_MAX_TABLE_SIZE", MID_UNICAST_MASTER_MAX_TABLE_SIZE, not_supported },
+	{ "ACCEPTABLE_MASTER_TABLE_ENABLED", MID_ACCEPTABLE_MASTER_TABLE_ENABLED, not_supported },
+	{ "ALTERNATE_MASTER", MID_ALTERNATE_MASTER, not_supported },
+	{ "TRANSPARENT_CLOCK_PORT_DATA_SET", MID_TRANSPARENT_CLOCK_PORT_DATA_SET, not_supported },
+	{ "DELAY_MECHANISM", MID_DELAY_MECHANISM, do_get_action },
+	{ "LOG_MIN_PDELAY_REQ_INTERVAL", MID_LOG_MIN_PDELAY_REQ_INTERVAL, do_get_action },
+	{ "PORT_DATA_SET_NP", MID_PORT_DATA_SET_NP, do_set_action },
+	{ "PORT_PROPERTIES_NP", MID_PORT_PROPERTIES_NP, do_get_action },
+	{ "PORT_STATS_NP", MID_PORT_STATS_NP, do_get_action },
+	{ "PORT_SERVICE_STATS_NP", MID_PORT_SERVICE_STATS_NP, do_get_action },
+	{ "UNICAST_MASTER_TABLE_NP", MID_UNICAST_MASTER_TABLE_NP, do_get_action },
+	{ "PORT_HWCLOCK_NP", MID_PORT_HWCLOCK_NP, do_get_action },
+	{ "POWER_PROFILE_SETTINGS_NP", MID_POWER_PROFILE_SETTINGS_NP, do_set_action },
+};
+
+static void do_get_action(struct pmc *pmc, int action, int index, char *str)
+{
+	if (action == GET)
+		pmc_send_get_action(pmc, idtab[index].code);
+	else
+		fprintf(stderr, "%s only allows GET\n", idtab[index].name);
+}
+
+static void do_set_action(struct pmc *pmc, int action, int index, char *str)
+{
+	int cnt, code = idtab[index].code, freq_traceable, leap_59, leap_61,
+		ptp_timescale, time_traceable, utc_off_valid;
+	struct alternate_time_offset_properties atop;
+	struct ieee_c37_238_settings_np pwr;
+	struct grandmaster_settings_np gsn;
+	struct management_tlv_datum mtd;
+	struct subscribe_events_np sen;
+	struct port_ds_np pnp;
+	char onoff_port_state[4] = "off";
+	char onoff_time_status[4] = "off";
+	char display_name[11] = {0};
+	uint64_t jump;
+	uint8_t key;
+	int enable;
+
+	mtd.reserved = 0;
+
+	switch (action) {
+	case GET:
+		pmc_send_get_action(pmc, code);
+		return;
+	case SET:
+		break;
+	case RESPONSE:
+	case COMMAND:
+	case ACKNOWLEDGE:
+	default:
+		fprintf(stderr, "%s only allows GET or SET\n",
+			idtab[index].name);
+		return;
+	}
+	switch (code) {
+	case MID_PRIORITY1:
+	case MID_PRIORITY2:
+		cnt = sscanf(str,  " %*s %*s %hhu", &mtd.val);
+		if (cnt != 1) {
+			fprintf(stderr, "%s SET needs 1 value\n",
+				idtab[index].name);
+			break;
+		}
+		pmc_send_set_action(pmc, code, &mtd, sizeof(mtd));
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_ENABLE:
+		cnt = sscanf(str,  " %*s %*s keyField %hhu enable %d",
+			     &mtd.val, &enable);
+		if (cnt != 2) {
+			fprintf(stderr, "%s SET needs 2 values\n",
+				idtab[index].name);
+			break;
+		}
+		mtd.reserved = enable ? 1 : 0;
+		pmc_send_set_action(pmc, code, &mtd, sizeof(mtd));
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_NAME:
+		cnt = sscanf(str, " %*s %*s "
+			     "keyField       %hhu "
+			     "displayName    %10s ",
+			     &key,
+			     display_name);
+		if (cnt != 2) {
+			fprintf(stderr, "%s SET needs 2 values\n",
+				idtab[index].name);
+			break;
+		}
+		pmc_send_set_aton(pmc, code, key, display_name);
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_PROPERTIES:
+		memset(&atop, 0, sizeof(atop));
+		cnt = sscanf(str, " %*s %*s "
+			     "keyField       %hhu "
+			     "currentOffset  %d "
+			     "jumpSeconds    %d "
+			     "timeOfNextJump %" SCNu64,
+			     &atop.keyField,
+			     &atop.currentOffset,
+			     &atop.jumpSeconds,
+			     &jump);
+		if (cnt != 4) {
+			fprintf(stderr, "%s SET needs 4 values\n",
+				idtab[index].name);
+			break;
+		}
+		atop.timeOfNextJump.seconds_lsb = jump & 0xffffffff;
+		atop.timeOfNextJump.seconds_msb = jump >> 32;
+		pmc_send_set_action(pmc, code, &atop, sizeof(atop));
+		break;
+	case MID_GRANDMASTER_SETTINGS_NP:
+		cnt = sscanf(str, " %*s %*s "
+			     "clockClass              %hhu "
+			     "clockAccuracy           %hhx "
+			     "offsetScaledLogVariance %hx "
+			     "currentUtcOffset        %hd "
+			     "leap61                  %d "
+			     "leap59                  %d "
+			     "currentUtcOffsetValid   %d "
+			     "ptpTimescale            %d "
+			     "timeTraceable           %d "
+			     "frequencyTraceable      %d "
+			     "timeSource              %hhx ",
+			     &gsn.clockQuality.clockClass,
+			     &gsn.clockQuality.clockAccuracy,
+			     &gsn.clockQuality.offsetScaledLogVariance,
+			     &gsn.utc_offset,
+			     &leap_61,
+			     &leap_59,
+			     &utc_off_valid,
+			     &ptp_timescale,
+			     &time_traceable,
+			     &freq_traceable,
+			     &gsn.time_source);
+		if (cnt != 11) {
+			fprintf(stderr, "%s SET needs 11 values\n",
+				idtab[index].name);
+			break;
+		}
+		gsn.time_flags = 0;
+		if (leap_61)
+			gsn.time_flags |= LEAP_61;
+		if (leap_59)
+			gsn.time_flags |= LEAP_59;
+		if (utc_off_valid)
+			gsn.time_flags |= UTC_OFF_VALID;
+		if (ptp_timescale)
+			gsn.time_flags |= PTP_TIMESCALE;
+		if (time_traceable)
+			gsn.time_flags |= TIME_TRACEABLE;
+		if (freq_traceable)
+			gsn.time_flags |= FREQ_TRACEABLE;
+		pmc_send_set_action(pmc, code, &gsn, sizeof(gsn));
+		break;
+	case MID_SUBSCRIBE_EVENTS_NP:
+		memset(&sen, 0, sizeof(sen));
+		cnt = sscanf(str, " %*s %*s "
+			     "duration          %hu "
+			     "NOTIFY_PORT_STATE %3s "
+			     "NOTIFY_TIME_SYNC  %3s ",
+			     &sen.duration,
+			     onoff_port_state,
+			     onoff_time_status);
+		if (cnt != 3) {
+			fprintf(stderr, "%s SET needs 3 values\n",
+				idtab[index].name);
+			break;
+		}
+		if (!strcasecmp(onoff_port_state, "on")) {
+			event_bitmask_set(sen.bitmask, NOTIFY_PORT_STATE, TRUE);
+		}
+		if (!strcasecmp(onoff_time_status, "on")) {
+			event_bitmask_set(sen.bitmask, NOTIFY_TIME_SYNC, TRUE);
+		}
+		pmc_send_set_action(pmc, code, &sen, sizeof(sen));
+		break;
+	case MID_SYNCHRONIZATION_UNCERTAIN_NP:
+		cnt = sscanf(str,  " %*s %*s %hhu", &mtd.val);
+		if (cnt != 1) {
+			fprintf(stderr, "%s SET needs 1 value\n",
+				idtab[index].name);
+			break;
+		}
+		switch (mtd.val) {
+		case SYNC_UNCERTAIN_DONTCARE:
+		case SYNC_UNCERTAIN_FALSE:
+		case SYNC_UNCERTAIN_TRUE:
+			pmc_send_set_action(pmc, code, &mtd, sizeof(mtd));
+			break;
+		default:
+			fprintf(stderr, "\nusage: set SYNCHRONIZATION_UNCERTAIN_NP "
+				"%hhu (false), %hhu (true), or %hhu (don't care)\n\n",
+				SYNC_UNCERTAIN_FALSE,
+				SYNC_UNCERTAIN_TRUE,
+				SYNC_UNCERTAIN_DONTCARE);
+		}
+		break;
+	case MID_PORT_DATA_SET_NP:
+		cnt = sscanf(str, " %*s %*s "
+			     "neighborPropDelayThresh %u "
+			     "asCapable               %d ",
+			     &pnp.neighborPropDelayThresh,
+			     &pnp.asCapable);
+		if (cnt != 2) {
+			fprintf(stderr, "%s SET needs 2 values\n",
+				idtab[index].name);
+			break;
+		}
+		pmc_send_set_action(pmc, code, &pnp, sizeof(pnp));
+		break;
+	case MID_POWER_PROFILE_SETTINGS_NP:
+		cnt = sscanf(str, " %*s %*s "
+			     "version                   %hu "
+			     "grandmasterID             %hx "
+			     "grandmasterTimeInaccuracy %u "
+			     "networkTimeInaccuracy     %u "
+			     "totalTimeInaccuracy       %u ",
+			     &pwr.version,
+			     &pwr.grandmasterID,
+			     &pwr.grandmasterTimeInaccuracy,
+			     &pwr.networkTimeInaccuracy,
+			     &pwr.totalTimeInaccuracy);
+		if (cnt != 5) {
+			fprintf(stderr, "%s SET needs 5 values\n",
+				idtab[index].name);
+			break;
+		}
+		switch (pwr.version) {
+		case IEEE_C37_238_VERSION_NONE:
+		case IEEE_C37_238_VERSION_2011:
+		case IEEE_C37_238_VERSION_2017:
+			pmc_send_set_action(pmc, code, &pwr, sizeof(pwr));
+			break;
+		default:
+			fprintf(stderr, "\nusage: set PROFILE_SETTINGS_NP version "
+				"%hu (none), %hu (2011), or %hu (2017)\n\n",
+				IEEE_C37_238_VERSION_NONE,
+				IEEE_C37_238_VERSION_2011,
+				IEEE_C37_238_VERSION_2017);
+		}
+		break;
+	}
+}
+
+static void not_supported(struct pmc *pmc, int action, int index, char *str)
+{
+	fprintf(stdout, "sorry, %s not supported yet\n", idtab[index].name);
+}
+
+static void null_management(struct pmc *pmc, int action, int index, char *str)
+{
+	if (action == GET)
+		pmc_send_get_action(pmc, idtab[index].code);
+	else
+		puts("non-get actions still todo");
+}
+
+static int parse_action(char *s)
+{
+	int len = strlen(s);
+	if (0 == strncasecmp(s, "GET", len))
+		return GET;
+	else if (0 == strncasecmp(s, "SET", len))
+		return SET;
+	else if (0 == strncasecmp(s, "CMD", len))
+		return COMMAND;
+	else if (0 == strncasecmp(s, "COMMAND", len))
+		return COMMAND;
+	return BAD_ACTION;
+}
+
+static int parse_id(char *s)
+{
+	int i, index = BAD_ID, len = strlen(s);
+	/* check for exact match */
+	for (i = 0; i < ARRAY_SIZE(idtab); i++) {
+		if (strcasecmp(s, idtab[i].name) == 0) {
+			return i;
+		}
+	}
+	/* look for a unique prefix match */
+	for (i = 0; i < ARRAY_SIZE(idtab); i++) {
+		if (0 == strncasecmp(s, idtab[i].name, len)) {
+			if (index == BAD_ID)
+				index = i;
+			else
+				return AMBIGUOUS_ID;
+		}
+	}
+	return index;
+}
+
+static int parse_target(struct pmc *pmc, const char *str)
+{
+	struct PortIdentity pid;
+
+	if (str[0] == '*') {
+		memset(&pid, 0xff, sizeof(pid));
+	} else if (str2pid(str, &pid)) {
+		return -1;
+	}
+
+	return pmc_target(pmc, &pid);
+}
+
+static void print_help(FILE *fp)
+{
+	int i;
+	fprintf(fp, "\n");
+	for (i = 0; i < ARRAY_SIZE(idtab); i++) {
+		if (idtab[i].func != not_supported)
+			fprintf(fp, "\t[action] %s\n", idtab[i].name);
+	}
+	fprintf(fp, "\n");
+	fprintf(fp, "\tThe [action] can be GET, SET, CMD, or COMMAND\n");
+	fprintf(fp, "\tCommands are case insensitive and may be abbreviated.\n");
+	fprintf(fp, "\n");
+	fprintf(fp, "\tTARGET [portIdentity]\n");
+	fprintf(fp, "\tTARGET *\n");
+	fprintf(fp, "\n");
+}
 
 struct pmc {
 	UInteger16 sequence_id;
@@ -57,6 +475,7 @@ struct pmc {
 	struct PortIdentity target;
 
 	struct transport *transport;
+	struct interface *iface;
 	struct fdarray fdarray;
 	int zero_length_gets;
 };
@@ -72,13 +491,16 @@ struct pmc *pmc_create(struct config *cfg, enum transport_type transport_type,
 	if (!pmc)
 		return NULL;
 
-	if (transport_type != TRANS_UDS &&
-	    generate_clock_identity(&pmc->port_identity.clockIdentity,
-				    iface_name)) {
-		pr_err("failed to generate a clock identity");
-		goto failed;
+	if (transport_type == TRANS_UDS) {
+		pmc->port_identity.portNumber = getpid();
+	} else {
+		if (generate_clock_identity(&pmc->port_identity.clockIdentity,
+					    iface_name)) {
+			pr_err("failed to generate a clock identity");
+			goto failed;
+		}
+		pmc->port_identity.portNumber = 1;
 	}
-	pmc->port_identity.portNumber = 1;
 	pmc_target_all(pmc);
 
 	pmc->boundary_hops = boundary_hops;
@@ -90,15 +512,24 @@ struct pmc *pmc_create(struct config *cfg, enum transport_type transport_type,
 		pr_err("failed to create transport");
 		goto failed;
 	}
-	if (transport_open(pmc->transport, iface_name,
+
+	pmc->iface = interface_create(iface_name);
+	if (!pmc->iface) {
+		pr_err("failed to create interface");
+		goto failed;
+	}
+
+	if (transport_open(pmc->transport, pmc->iface,
 			   &pmc->fdarray, TS_SOFTWARE)) {
 		pr_err("failed to open transport");
-		goto failed;
+		goto no_trans_open;
 	}
 	pmc->zero_length_gets = zero_datalen ? 1 : 0;
 
 	return pmc;
 
+no_trans_open:
+	interface_destroy(pmc->iface);
 failed:
 	if (pmc->transport)
 		transport_destroy(pmc->transport);
@@ -109,6 +540,7 @@ failed:
 void pmc_destroy(struct pmc *pmc)
 {
 	transport_close(pmc->transport, &pmc->fdarray);
+	interface_destroy(pmc->iface);
 	transport_destroy(pmc->transport);
 	free(pmc);
 }
@@ -131,7 +563,6 @@ static struct ptp_message *pmc_message(struct pmc *pmc, uint8_t action)
 	msg->header.domainNumber       = pmc->domain_number;
 	msg->header.sourcePortIdentity = pmc->port_identity;
 	msg->header.sequenceId         = pmc->sequence_id++;
-	msg->header.control            = CTL_MANAGEMENT;
 	msg->header.logMessageInterval = 0x7f;
 
 	msg->management.targetPortIdentity = pmc->target;
@@ -142,35 +573,7 @@ static struct ptp_message *pmc_message(struct pmc *pmc, uint8_t action)
 	return msg;
 }
 
-#ifdef KSZ_1588_PTP
-static struct ptp_message *pmc_signaling(struct pmc *pmc)
-{
-	struct ptp_message *msg;
-	int pdulen;
-
-	msg = msg_allocate();
-	if (!msg)
-		return NULL;
-
-	pdulen = sizeof(struct signaling_msg);
-	msg->hwts.type = TS_SOFTWARE;
-
-	msg->header.tsmt               = SIGNALING | pmc->transport_specific;
-	msg->header.ver                = PTP_VERSION;
-	msg->header.messageLength      = pdulen;
-	msg->header.domainNumber       = pmc->domain_number;
-	msg->header.sourcePortIdentity = pmc->port_identity;
-	msg->header.sequenceId         = pmc->sequence_id++;
-	msg->header.control            = CTL_OTHER;
-	msg->header.logMessageInterval = 0x7f;
-
-	msg->signaling.targetPortIdentity = pmc->target;
-
-	return msg;
-}
-#endif
-
-static int pmc_send(struct pmc *pmc, struct ptp_message *msg, int pdulen)
+static int pmc_send(struct pmc *pmc, struct ptp_message *msg)
 {
 	int err;
 
@@ -179,7 +582,8 @@ static int pmc_send(struct pmc *pmc, struct ptp_message *msg, int pdulen)
 		pr_err("msg_pre_send failed");
 		return -1;
 	}
-	return transport_send(pmc->transport, &pmc->fdarray, 0, msg);
+	return transport_send(pmc->transport, &pmc->fdarray,
+			      TRANS_GENERAL, msg);
 }
 
 static int pmc_tlv_datalen(struct pmc *pmc, int id)
@@ -190,68 +594,89 @@ static int pmc_tlv_datalen(struct pmc *pmc, int id)
 		return len;
 
 	switch (id) {
-	case TLV_USER_DESCRIPTION:
+	case MID_USER_DESCRIPTION:
 		len += EMPTY_PTP_TEXT;
 		break;
-	case TLV_DEFAULT_DATA_SET:
+	case MID_DEFAULT_DATA_SET:
 		len += sizeof(struct defaultDS);
 		break;
-	case TLV_CURRENT_DATA_SET:
+	case MID_CURRENT_DATA_SET:
 		len += sizeof(struct currentDS);
 		break;
-	case TLV_PARENT_DATA_SET:
+	case MID_PARENT_DATA_SET:
 		len += sizeof(struct parentDS);
 		break;
-	case TLV_TIME_PROPERTIES_DATA_SET:
+	case MID_TIME_PROPERTIES_DATA_SET:
 		len += sizeof(struct timePropertiesDS);
 		break;
-	case TLV_PRIORITY1:
-	case TLV_PRIORITY2:
-	case TLV_DOMAIN:
-	case TLV_SLAVE_ONLY:
-	case TLV_CLOCK_ACCURACY:
-	case TLV_TRACEABILITY_PROPERTIES:
-	case TLV_TIMESCALE_PROPERTIES:
+	case MID_PRIORITY1:
+	case MID_PRIORITY2:
+	case MID_DOMAIN:
+	case MID_SLAVE_ONLY:
+	case MID_CLOCK_ACCURACY:
+	case MID_TRACEABILITY_PROPERTIES:
+	case MID_TIMESCALE_PROPERTIES:
+	case MID_MASTER_ONLY:
+	case MID_SYNCHRONIZATION_UNCERTAIN_NP:
 		len += sizeof(struct management_tlv_datum);
 		break;
-	case TLV_TIME_STATUS_NP:
+	case MID_TIME_STATUS_NP:
 		len += sizeof(struct time_status_np);
 		break;
-	case TLV_GRANDMASTER_SETTINGS_NP:
+	case MID_ALTERNATE_TIME_OFFSET_ENABLE:
+		len += sizeof(struct management_tlv_datum);
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_NAME:
+		len += sizeof(struct alternate_time_offset_name);
+		break;
+	case MID_ALTERNATE_TIME_OFFSET_PROPERTIES:
+		len += sizeof(struct alternate_time_offset_properties);
+		break;
+	case MID_GRANDMASTER_SETTINGS_NP:
 		len += sizeof(struct grandmaster_settings_np);
 		break;
-	case TLV_NULL_MANAGEMENT:
+	case MID_SUBSCRIBE_EVENTS_NP:
+		len += sizeof(struct subscribe_events_np);
 		break;
-	case TLV_CLOCK_DESCRIPTION:
+	case MID_NULL_MANAGEMENT:
+		break;
+	case MID_CLOCK_DESCRIPTION:
 		len += EMPTY_CLOCK_DESCRIPTION;
 		break;
-	case TLV_PORT_DATA_SET:
+	case MID_PORT_DATA_SET:
 		len += sizeof(struct portDS);
 		break;
-	case TLV_PORT_DATA_SET_NP:
+	case MID_PORT_DATA_SET_NP:
 		len += sizeof(struct port_ds_np);
 		break;
-	case TLV_LOG_ANNOUNCE_INTERVAL:
-	case TLV_ANNOUNCE_RECEIPT_TIMEOUT:
-	case TLV_LOG_SYNC_INTERVAL:
-	case TLV_VERSION_NUMBER:
-	case TLV_DELAY_MECHANISM:
-	case TLV_LOG_MIN_PDELAY_REQ_INTERVAL:
-#ifdef KSZ_1588_PTP
-	case TLV_NEIGHBOR_PROP_DELAY:
-		len += sizeof(uint32_t);
+	case MID_PORT_PROPERTIES_NP:
+		len += EMPTY_PORT_PROPERTIES_NP;
 		break;
-	case TLV_MASTER_ONLY:
-	case TLV_INITIAL_LOG_PDELAY_REQ_INTERVAL:
-	case TLV_OPER_LOG_PDELAY_REQ_INTERVAL:
-	case TLV_INITIAL_LOG_SYNC_INTERVAL:
-	case TLV_OPER_LOG_SYNC_INTERVAL:
-	case TLV_WAKE_INFO:
-#endif
+	case MID_PORT_STATS_NP:
+		len += sizeof(struct port_stats_np);
+		break;
+	case MID_PORT_SERVICE_STATS_NP:
+		len += sizeof(struct port_service_stats_np);
+		break;
+	case MID_UNICAST_MASTER_TABLE_NP:
+		len += EMPTY_UNICAST_MASTER_TABLE_NP;
+		break;
+	case MID_PORT_HWCLOCK_NP:
+		len += sizeof(struct port_hwclock_np);
+		break;
+	case MID_POWER_PROFILE_SETTINGS_NP:
+		len += sizeof(struct ieee_c37_238_settings_np);
+		break;
+	case MID_LOG_ANNOUNCE_INTERVAL:
+	case MID_ANNOUNCE_RECEIPT_TIMEOUT:
+	case MID_LOG_SYNC_INTERVAL:
+	case MID_VERSION_NUMBER:
+	case MID_DELAY_MECHANISM:
+	case MID_LOG_MIN_PDELAY_REQ_INTERVAL:
 		len += sizeof(struct management_tlv_datum);
 		break;
 	}
-	return len;
+	return len + len % 2;
 }
 
 int pmc_get_transport_fd(struct pmc *pmc)
@@ -264,6 +689,8 @@ int pmc_send_get_action(struct pmc *pmc, int id)
 	int datalen, pdulen;
 	struct ptp_message *msg;
 	struct management_tlv *mgt;
+	struct tlv_extra *extra;
+
 	msg = pmc_message(pmc, GET);
 	if (!msg) {
 		return -1;
@@ -275,14 +702,22 @@ int pmc_send_get_action(struct pmc *pmc, int id)
 	mgt->id = id;
 	pdulen = msg->header.messageLength + sizeof(*mgt) + datalen;
 	msg->header.messageLength = pdulen;
-	msg->tlv_count = 1;
 
-	if (id == TLV_CLOCK_DESCRIPTION && !pmc->zero_length_gets) {
+	extra = tlv_extra_alloc();
+	if (!extra) {
+		pr_err("failed to allocate TLV descriptor");
+		msg_put(msg);
+		return -ENOMEM;
+	}
+	extra->tlv = (struct TLV *) msg->management.suffix;
+	msg_tlv_attach(msg, extra);
+
+	if (id == MID_CLOCK_DESCRIPTION && !pmc->zero_length_gets) {
 		/*
 		 * Make sure the tlv_extra pointers dereferenced in
 		 * mgt_pre_send() do point to something.
 		 */
-		struct mgmt_clock_description *cd = &msg->last_tlv.cd;
+		struct mgmt_clock_description *cd = &extra->cd;
 		uint8_t *buf = mgt->data;
 		cd->clockType = (UInteger16 *) buf;
 		buf += sizeof(*cd->clockType);
@@ -293,7 +728,7 @@ int pmc_send_get_action(struct pmc *pmc, int id)
 		cd->protocolAddress = (struct PortAddress *) buf;
 	}
 
-	pmc_send(pmc, msg, pdulen);
+	pmc_send(pmc, msg);
 	msg_put(msg);
 
 	return 0;
@@ -301,46 +736,64 @@ int pmc_send_get_action(struct pmc *pmc, int id)
 
 int pmc_send_set_action(struct pmc *pmc, int id, void *data, int datasize)
 {
-	int pdulen;
-	struct ptp_message *msg;
 	struct management_tlv *mgt;
+	struct ptp_message *msg;
+	struct tlv_extra *extra;
+
 	msg = pmc_message(pmc, SET);
 	if (!msg) {
 		return -1;
 	}
-	mgt = (struct management_tlv *) msg->management.suffix;
+	extra = msg_tlv_append(msg, sizeof(*mgt) + datasize);
+	if (!extra) {
+		msg_put(msg);
+		return -ENOMEM;
+	}
+	mgt = (struct management_tlv *) extra->tlv;
 	mgt->type = TLV_MANAGEMENT;
 	mgt->length = 2 + datasize;
 	mgt->id = id;
 	memcpy(mgt->data, data, datasize);
-	pdulen = msg->header.messageLength + sizeof(*mgt) + datasize;
-	msg->header.messageLength = pdulen;
-	msg->tlv_count = 1;
-	pmc_send(pmc, msg, pdulen);
+	pmc_send(pmc, msg);
 	msg_put(msg);
 
 	return 0;
 }
 
-#ifdef KSZ_1588_PTP
-int pmc_send_signaling(struct pmc *pmc, void *data, int datasize)
+int pmc_send_set_aton(struct pmc *pmc, int id, uint8_t key, const char *name)
 {
-	int pdulen;
+	struct alternate_time_offset_name *aton;
+	struct management_tlv *mgt;
 	struct ptp_message *msg;
-	msg = pmc_signaling(pmc);
+	struct tlv_extra *extra;
+	int datasize;
+
+	datasize = sizeof(*aton) + strlen(name);
+	if (datasize % 2) {
+		datasize++;
+	}
+	msg = pmc_message(pmc, SET);
 	if (!msg) {
 		return -1;
 	}
-	memcpy(msg->signaling.suffix, data, datasize);
-	pdulen = msg->header.messageLength + datasize;
-	msg->header.messageLength = pdulen;
-	msg->tlv_count = 1;
-	pmc_send(pmc, msg, pdulen);
+	extra = msg_tlv_append(msg, sizeof(*mgt) + datasize);
+	if (!extra) {
+		msg_put(msg);
+		return -ENOMEM;
+	}
+	mgt = (struct management_tlv *) extra->tlv;
+	mgt->type = TLV_MANAGEMENT;
+	mgt->length = 2 + datasize;
+	mgt->id = id;
+	aton = (struct alternate_time_offset_name *) mgt->data;
+	aton->keyField = key;
+	ptp_text_set(&aton->displayName, name);
+
+	pmc_send(pmc, msg);
 	msg_put(msg);
 
 	return 0;
 }
-#endif
 
 struct ptp_message *pmc_recv(struct pmc *pmc)
 {
@@ -364,13 +817,15 @@ struct ptp_message *pmc_recv(struct pmc *pmc)
 		case -EBADMSG:
 			pr_err("bad message");
 			break;
-		case -ETIME:
-			pr_err("received %s without timestamp",
-					msg_type_string(msg_type(msg)));
-			break;
 		case -EPROTO:
 			pr_debug("ignoring message");
+			break;
 		}
+		goto failed;
+	}
+	if (msg_sots_missing(msg)) {
+		pr_err("received %s without timestamp",
+		       msg_type_string(msg_type(msg)));
 		goto failed;
 	}
 
@@ -394,4 +849,44 @@ void pmc_target_port(struct pmc *pmc, UInteger16 portNumber)
 void pmc_target_all(struct pmc *pmc)
 {
 	memset(&pmc->target, 0xff, sizeof(pmc->target));
+}
+
+const char *pmc_action_string(int action)
+{
+	return action_string[action];
+}
+
+int pmc_do_command(struct pmc *pmc, char *str)
+{
+	int action, id;
+	char action_str[10+1] = {0}, id_str[64+1] = {0};
+
+	if (0 == strncasecmp(str, "HELP", strlen(str))) {
+		print_help(stdout);
+		return 0;
+	}
+
+	if (2 != sscanf(str, " %10s %64s", action_str, id_str))
+		return -1;
+
+	if (0 == strncasecmp(action_str, "TARGET", strlen(action_str)))
+		return parse_target(pmc, id_str);
+
+	action = parse_action(action_str);
+	id = parse_id(id_str);
+
+	if (action == BAD_ACTION || id == BAD_ID)
+		return -1;
+
+	if (id == AMBIGUOUS_ID) {
+		fprintf(stdout, "id %s is too ambiguous\n", id_str);
+		return 0;
+	}
+
+	fprintf(stdout, "sending: %s %s\n",
+		action_string[action], idtab[id].name);
+
+	idtab[id].func(pmc, action, id, str);
+
+	return 0;
 }

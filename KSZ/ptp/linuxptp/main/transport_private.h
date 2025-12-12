@@ -29,25 +29,33 @@
 struct transport {
 	enum transport_type type;
 	struct config *cfg;
+#ifdef KSZ_1588_PTP
+	struct interface *iface;
+#endif
 
 	int (*close)(struct transport *t, struct fdarray *fda);
 
-	int (*open)(struct transport *t, const char *name, struct fdarray *fda,
-		    enum timestamp_type tt);
+	int (*open)(struct transport *t, struct interface *iface,
+		    struct fdarray *fda, enum timestamp_type tt);
 
 	int (*recv)(struct transport *t, int fd, void *buf, int buflen,
 		    struct address *addr, struct hw_timestamp *hwts);
 
 #ifdef KSZ_1588_PTP
-	const char *name;
-	enum timestamp_type ts_type;
-	int (*recv_err)(struct transport *t, int fd, void *buf, int buflen,
-			struct address *addr, struct hw_timestamp *hwts);
+#ifdef KSZ_1588_PTP_DELAYED_TX_TIMESTAMP
+	int (*rerr)(struct transport *t, int fd, void *buf, int buflen,
+		    struct address *addr, struct hw_timestamp *hwts);
 #endif
 
-	int (*send)(struct transport *t, struct fdarray *fda, int event,
-		    int peer, void *buf, int buflen, struct address *addr,
-		    struct hw_timestamp *hwts);
+#ifdef KSZ_1588_PTP_HW
+	int (*filt)(struct transport *t, struct interface *iface, int fd,
+		    int rx_sync);
+#endif
+#endif
+
+	int (*send)(struct transport *t, struct fdarray *fda,
+		    enum transport_event event, int peer, void *buf, int buflen,
+		    struct address *addr, struct hw_timestamp *hwts);
 
 	void (*release)(struct transport *t);
 

@@ -20,7 +20,9 @@
 #ifndef HAVE_RTNL_H
 #define HAVE_RTNL_H
 
-typedef void (*rtnl_callback)(void *ctx, int index, int linkup);
+#include <net/if.h>
+
+typedef void (*rtnl_callback)(void *ctx, int linkup, int ts_index);
 
 /**
  * Close a RT netlink socket.
@@ -30,20 +32,41 @@ typedef void (*rtnl_callback)(void *ctx, int index, int linkup);
 int rtnl_close(int fd);
 
 /**
- * Request the link status from the kernel.
- * @param fd  A socket obtained via rtnl_open().
- * @return    Zero on success, non-zero otherwise.
+ * Get name of the slave interface which timestamps packets going through
+ * a master interface (e.g. bond0)
+ * @param device    Name of the master interface.
+ * @param ts_device Buffer for the name of the slave interface, which must be
+ *                  at least IF_NAMESIZE bytes long.
+ * @return          Zero on success, or -1 on error.
  */
-int rtnl_link_query(int fd);
+int rtnl_get_ts_device(const char *device, char ts_device[IF_NAMESIZE]);
+
+/**
+ * Request the link status from the kernel.
+ * @param fd     A socket obtained via rtnl_open().
+ * @param device Interface name. Request all iface's status if set NULL.
+ * @return       Zero on success, non-zero otherwise.
+ */
+int rtnl_link_query(int fd, const char *device);
 
 /**
  * Read kernel messages looking for a link up/down events.
- * @param fd   Readable socket obtained via rtnl_open().
- * @param cb   Callback function to be invoked on each event.
- * @param ctx  Private context passed to the callback.
- * @return     Zero on success, non-zero otherwise.
+ * @param fd     Readable socket obtained via rtnl_open().
+ * @param device The device which we need to get link info.
+ * @param cb     Callback function to be invoked on each event.
+ * @param ctx    Private context passed to the callback.
+ * @return       Zero on success, non-zero otherwise.
  */
-int rtnl_link_status(int fd, rtnl_callback cb, void *ctx);
+int rtnl_link_status(int fd, const char *device, rtnl_callback cb, void *ctx);
+
+/**
+ * Check if the PHC is a virtual clock of the interface (i.e. sockets bound to
+ * the interface also need to be bound to the clock).
+ * @param device    Name of the interface.
+ * @param phc_index Index of the clock to check.
+ * @return          1 if true, otherwise 0.
+ */
+int rtnl_iface_has_vclock(const char *device, int phc_index);
 
 /**
  * Open a RT netlink socket for monitoring link state.

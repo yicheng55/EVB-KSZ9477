@@ -16,7 +16,9 @@
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
+#include <arpa/inet.h>
 #include <errno.h>
+#include <linux/limits.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -24,6 +26,7 @@
 #include <string.h>
 
 #include "address.h"
+#include "phc.h"
 #include "print.h"
 #include "sk.h"
 #include "util.h"
@@ -68,6 +71,75 @@ const char *ev_str[] = {
 	"RS_PASSIVE",
 };
 
+const char *ts_str(enum timestamp_type ts)
+{
+	switch (ts) {
+	case TS_SOFTWARE:
+		return "SOFTWARE";
+	case TS_HARDWARE:
+		return "HARDWARE";
+	case TS_LEGACY_HW:
+		return "LEGACY_HW";
+	case TS_ONESTEP:
+		return "ONESTEP";
+	case TS_P2P1STEP:
+		return "P2P1STEP";
+	}
+
+	return "???";
+}
+
+int addreq(enum transport_type type, struct address *a, struct address *b)
+{
+	void *bufa, *bufb;
+	int len;
+
+	switch (type) {
+	case TRANS_UDP_IPV4:
+		bufa = &a->sin.sin_addr;
+		bufb = &b->sin.sin_addr;
+		len = sizeof(a->sin.sin_addr);
+		break;
+	case TRANS_UDP_IPV6:
+		bufa = &a->sin6.sin6_addr;
+		bufb = &b->sin6.sin6_addr;
+		len = sizeof(a->sin6.sin6_addr);
+		break;
+	case TRANS_IEEE_802_3:
+		bufa = &a->sll.sll_addr;
+		bufb = &b->sll.sll_addr;
+		len = MAC_LEN;
+		break;
+	case TRANS_UDS:
+	case TRANS_DEVICENET:
+	case TRANS_CONTROLNET:
+	case TRANS_PROFINET:
+	default:
+		pr_err("sorry, cannot compare addresses for this transport");
+		return 0;
+	}
+	return memcmp(bufa, bufb, len) == 0 ? 1 : 0;
+}
+
+char *bin2str_impl(Octet *data, int len, char *buf, int buf_len)
+{
+	int i, offset = 0;
+	if (len > MAX_PRINT_BYTES)
+		len = MAX_PRINT_BYTES;
+	buf[0] = '\0';
+	if (!data)
+		return buf;
+	if (len)
+		offset += snprintf(buf, buf_len, "%02hhx", data[0]);
+	for (i = 1; i < len; i++) {
+		if (offset >= buf_len)
+			/* truncated output */
+			break;
+		offset += snprintf(buf + offset, buf_len - offset, ":%02hhx", data[i]);
+	}
+	return buf;
+}
+
 char *cid2str(struct ClockIdentity *id)
 {
 	static char buf[64];
@@ -100,6 +172,161 @@ char *pid2str(struct PortIdentity *id)
 	return buf;
 }
 
+char *portaddr2str(struct PortAddress *addr)
+{
+	static char buf[BIN_BUF_SIZE];
+	switch (align16(&addr->networkProtocol)) {
+	case TRANS_UDP_IPV4:
+		if (align16(&addr->addressLength) == 4
+			&& inet_ntop(AF_INET, addr->address, buf, sizeof(buf)))
+			return buf;
+		break;
+	case TRANS_UDP_IPV6:
+		if (align16(&addr->addressLength) == 16
+			&& inet_ntop(AF_INET6, addr->address, buf, sizeof(buf)))
+			return buf;
+		break;
+	}
+	bin2str_impl(addr->address, align16(&addr->addressLength), buf, sizeof(buf));
+	return buf;
+}
+
+const char *ustate2str(enum unicast_state ustate)
+{
+	switch (ustate) {
+	case UC_WAIT:
+		return "WAIT";
+	case UC_HAVE_ANN:
+		return "HAVE_ANN";
+	case UC_NEED_SYDY:
+		return "NEED_SYDY";
+	case UC_HAVE_SYDY:
+		return "HAVE_SYDY";
+	}
+
+	return "???";
+}
+
+enum port_state port_state_normalize(enum port_state state)
+{
+	switch (state) {
+	case PS_MASTER:
+	case PS_SLAVE:
+	case PS_PRE_MASTER:
+	case PS_UNCALIBRATED:
+		return state;
+	default:
+		return PS_DISABLED;
+	}
+}
+
+void posix_clock_close(clockid_t clock)
+{
+	if (clock == CLOCK_REALTIME) {
+		return;
+	}
+	phc_close(clock);
+}
+
+clockid_t posix_clock_open(const char *device, int *phc_index)
+{
+	char phc_device_path[PATH_MAX];
+	struct sk_ts_info ts_info;
+	char phc_device[19];
+	int clkid;
+
+	/* check if device is CLOCK_REALTIME */
+	if (!strcasecmp(device, "CLOCK_REALTIME")) {
+		return CLOCK_REALTIME;
+	}
+
+	/* if the device name resolves so a plausible filesystem path, we
+	 * assume it is the path to a PHC char device, and treat it as such
+	 */
+	if (realpath(device, phc_device_path)) {
+		clkid = phc_open(device);
+		if (clkid == CLOCK_INVALID)
+			return clkid;
+
+		if (!strncmp(phc_device_path, "/dev/ptp", strlen("/dev/ptp"))) {
+			int r = get_ranged_int(phc_device_path + strlen("/dev/ptp"),
+					       phc_index, 0, 65535);
+			if (r) {
+				fprintf(stderr,
+					"failed to parse PHC index from %s\n",
+					phc_device_path);
+				phc_close(clkid);
+				return CLOCK_INVALID;
+			}
+		}
+		return clkid;
+	}
+
+	/* check if device is a valid ethernet device */
+	if (sk_get_ts_info(device, &ts_info) || !ts_info.valid) {
+		pr_err("unknown clock %s: %m", device);
+		return CLOCK_INVALID;
+	}
+	if (ts_info.phc_index < 0) {
+		pr_err("interface %s does not have a PHC", device);
+		return CLOCK_INVALID;
+	}
+	snprintf(phc_device, sizeof(phc_device), "/dev/ptp%d", ts_info.phc_index);
+	clkid = phc_open(phc_device);
+	if (clkid == CLOCK_INVALID) {
+		pr_err("cannot open %s for %s: %m", phc_device, device);
+	}
+	*phc_index = ts_info.phc_index;
+	return clkid;
+}
+
+int str2addr(enum transport_type type, const char *s, struct address *addr)
+{
+	unsigned char mac[MAC_LEN];
+	struct in_addr ipv4_addr;
+	struct in6_addr ipv6_addr;
+
+	memset(addr, 0, sizeof(*addr));
+
+	switch (type) {
+	case TRANS_UDS:
+	case TRANS_DEVICENET:
+	case TRANS_CONTROLNET:
+	case TRANS_PROFINET:
+		pr_err("sorry, cannot convert addresses for this transport");
+		return -1;
+	case TRANS_UDP_IPV4:
+		if (!inet_aton(s, &ipv4_addr)) {
+			pr_err("bad IPv4 address");
+			return -1;
+		}
+		addr->sin.sin_family = AF_INET;
+		addr->sin.sin_addr = ipv4_addr;
+		addr->len = sizeof(addr->sin);
+		break;
+	case TRANS_UDP_IPV6:
+		if (1 != inet_pton(AF_INET6, s, &ipv6_addr)) {
+			pr_err("bad IPv6 address");
+			return -1;
+		}
+		addr->sin6.sin6_family = AF_INET6;
+		addr->sin6.sin6_addr = ipv6_addr;
+		addr->len = sizeof(addr->sin6);
+		break;
+	case TRANS_IEEE_802_3:
+		if (str2mac(s, mac)) {
+			pr_err("bad Layer-2 address");
+			return -1;
+		}
+		addr->sll.sll_family = AF_PACKET;
+		addr->sll.sll_halen = MAC_LEN;
+		memcpy(&addr->sll.sll_addr, mac, MAC_LEN);
+		addr->len = sizeof(addr->sll);
+		break;
+	}
+	return 0;
+}
+
 int str2mac(const char *s, unsigned char mac[MAC_LEN])
 {
 	unsigned char buf[MAC_LEN];
@@ -111,6 +338,21 @@ int str2mac(const char *s, unsigned char mac[MAC_LEN])
 	}
 	memcpy(mac, buf, MAC_LEN);
 	return 0;
+}
+
+int str2cid(const char *s, struct ClockIdentity *result)
+{
+	struct ClockIdentity cid;
+	unsigned char *ptr = cid.id;
+	int c;
+	c = sscanf(s, " %02hhx%02hhx%02hhx.%02hhx%02hhx.%02hhx%02hhx%02hhx",
+		   &ptr[0], &ptr[1], &ptr[2], &ptr[3],
+		   &ptr[4], &ptr[5], &ptr[6], &ptr[7]);
+	if (c == 8) {
+		*result = cid;
+		return 0;
+	}
+	return -1;
 }
 
 int str2pid(const char *s, struct PortIdentity *result)
@@ -135,14 +377,32 @@ int generate_clock_identity(struct ClockIdentity *ci, const char *name)
 
 	if (sk_interface_macaddr(name, &addr))
 		return -1;
-	ci->id[0] = addr.sll.sll_addr[0];
-	ci->id[1] = addr.sll.sll_addr[1];
-	ci->id[2] = addr.sll.sll_addr[2];
-	ci->id[3] = 0xFF;
-	ci->id[4] = 0xFE;
-	ci->id[5] = addr.sll.sll_addr[3];
-	ci->id[6] = addr.sll.sll_addr[4];
-	ci->id[7] = addr.sll.sll_addr[5];
+
+	switch (addr.sll.sll_halen) {
+		case EUI48:
+			ci->id[0] = addr.sll.sll_addr[0];
+			ci->id[1] = addr.sll.sll_addr[1];
+			ci->id[2] = addr.sll.sll_addr[2];
+			ci->id[3] = 0xFF;
+			ci->id[4] = 0xFE;
+			ci->id[5] = addr.sll.sll_addr[3];
+			ci->id[6] = addr.sll.sll_addr[4];
+			ci->id[7] = addr.sll.sll_addr[5];
+			break;
+		case EUI64:
+			ci->id[0] = addr.sll.sll_addr[0];
+			ci->id[1] = addr.sll.sll_addr[1];
+			ci->id[2] = addr.sll.sll_addr[2];
+			ci->id[3] = addr.sll.sll_addr[3];
+			ci->id[4] = addr.sll.sll_addr[4];
+			ci->id[5] = addr.sll.sll_addr[5];
+			ci->id[6] = addr.sll.sll_addr[6];
+			ci->id[7] = addr.sll.sll_addr[7];
+			break;
+		default:
+			return -1;
+	}
+
 	return 0;
 }
 
@@ -359,6 +619,10 @@ int handle_term_signals(void)
 	}
 	if (SIG_ERR == signal(SIGTERM, handle_int_quit_term)) {
 		fprintf(stderr, "cannot handle SIGTERM\n");
+		return -1;
+	}
+	if (SIG_ERR == signal(SIGHUP, handle_int_quit_term)) {
+		fprintf(stderr, "cannot handle SIGHUP\n");
 		return -1;
 	}
 	return 0;

@@ -25,7 +25,7 @@
 #include "print.h"
 
 static int verbose = 0;
-static int print_level = LOG_INFO;
+int print_level = LOG_INFO;
 static int use_syslog = 1;
 static const char *progname;
 static const char *message_tag;
@@ -73,35 +73,17 @@ void print(int level, char const *format, ...)
 
 	if (verbose) {
 		f = level >= LOG_NOTICE ? stdout : stderr;
-		fprintf(f, "%s[%ld.%03ld]: %s%s%s\n",
+		fprintf(f, "%s[%lld.%03ld]: %s%s%s\n",
 			progname ? progname : "",
-			ts.tv_sec, ts.tv_nsec / 1000000,
+			(long long)ts.tv_sec, ts.tv_nsec / 1000000,
 			message_tag ? message_tag : "", message_tag ? " " : "",
 			buf);
 		fflush(f);
 	}
 	if (use_syslog) {
-		syslog(level, "[%ld.%03ld] %s%s%s",
-		       ts.tv_sec, ts.tv_nsec / 1000000,
+		syslog(level, "[%lld.%03ld] %s%s%s",
+		       (long long)ts.tv_sec, ts.tv_nsec / 1000000,
 		       message_tag ? message_tag : "", message_tag ? " " : "",
 		       buf);
 	}
 }
-
-#ifdef KSZ_1588_PTP
-void timed_print(int level, struct timespec *ts, char const *buf)
-{
-	FILE *f;
-
-	if (verbose) {
-		f = level >= LOG_NOTICE ? stdout : stderr;
-		fprintf(f, "<%ld.%09ld>: %s\n",
-			ts->tv_sec, ts->tv_nsec, buf);
-		fflush(f);
-	}
-	if (use_syslog) {
-		syslog(level, "<%ld.%09ld> %s",
-		       ts->tv_sec, ts->tv_nsec, buf);
-	}
-}
-#endif

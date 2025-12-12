@@ -18,6 +18,7 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #include <errno.h>
+#include <time.h>
 #include <linux/net_tstamp.h>
 #include <linux/sockios.h>
 #include <linux/ethtool.h>
@@ -40,39 +41,95 @@
 
 int sk_tx_timeout = 1;
 int sk_check_fupsync;
+enum hwts_filter_mode sk_hwts_filter_mode = HWTS_FILTER_NORMAL;
 
 /* private methods */
 
-static int hwts_init(int fd, const char *device, int rx_filter, int one_step)
+static void init_ifreq(struct ifreq *ifreq, struct hwtstamp_config *cfg,
+	const char *device)
+{
+	memset(ifreq, 0, sizeof(*ifreq));
+	memset(cfg, 0, sizeof(*cfg));
+
+	strncpy(ifreq->ifr_name, device, sizeof(ifreq->ifr_name) - 1);
+
+	ifreq->ifr_data = (void *) cfg;
+}
+
+static int hwts_init(int fd, const char *device, int rx_filter,
+	int rx_filter2, int tx_type)
 {
 	struct ifreq ifreq;
-	struct hwtstamp_config cfg, req;
+	struct hwtstamp_config cfg;
+	int orig_rx_filter;
 	int err;
 
-	memset(&ifreq, 0, sizeof(ifreq));
-	memset(&cfg, 0, sizeof(cfg));
+	init_ifreq(&ifreq, &cfg, device);
 
-	strncpy(ifreq.ifr_name, device, sizeof(ifreq.ifr_name) - 1);
-
-	ifreq.ifr_data = (void *) &cfg;
-	cfg.tx_type    = one_step ? HWTSTAMP_TX_ONESTEP_SYNC : HWTSTAMP_TX_ON;
-	cfg.rx_filter  = rx_filter;
-	req = cfg;
-	err = ioctl(fd, SIOCSHWTSTAMP, &ifreq);
-	if (err < 0)
-		return err;
-
-	if (memcmp(&cfg, &req, sizeof(cfg))) {
-
-		pr_warning("driver changed our HWTSTAMP options");
-		pr_warning("tx_type   %d not %d", cfg.tx_type, req.tx_type);
-		pr_warning("rx_filter %d not %d", cfg.rx_filter, req.rx_filter);
-
-		if (cfg.tx_type != req.tx_type ||
-		    (cfg.rx_filter != HWTSTAMP_FILTER_ALL &&
-		     cfg.rx_filter != HWTSTAMP_FILTER_PTP_V2_EVENT)) {
-			return -1;
+	/* Test if VLAN over bond is supported. */
+	cfg.flags = HWTSTAMP_FLAG_BONDED_PHC_INDEX;
+	err = ioctl(fd, SIOCGHWTSTAMP, &ifreq);
+	if (err < 0) {
+		/*
+		 * Fall back without flag if user runs new build on old kernel
+		 * or if driver does not support SIOCGHWTSTAMP ioctl.
+		 */
+		if (errno == EINVAL || errno == EOPNOTSUPP) {
+			init_ifreq(&ifreq, &cfg, device);
+		} else {
+			pr_err("ioctl SIOCGHWTSTAMP failed: %m");
+			return err;
 		}
+	}
+
+	switch (sk_hwts_filter_mode) {
+	case HWTS_FILTER_CHECK:
+		err = ioctl(fd, SIOCGHWTSTAMP, &ifreq);
+		if (err < 0) {
+			pr_err("ioctl SIOCGHWTSTAMP failed: %m");
+			return err;
+		}
+		break;
+	case HWTS_FILTER_FULL:
+		cfg.tx_type   = tx_type;
+		cfg.rx_filter = HWTSTAMP_FILTER_ALL;
+		err = ioctl(fd, SIOCSHWTSTAMP, &ifreq);
+		if (err < 0) {
+			pr_err("ioctl SIOCSHWTSTAMP failed: %m");
+			return err;
+		}
+		break;
+	case HWTS_FILTER_NORMAL:
+		cfg.tx_type   = tx_type;
+		cfg.rx_filter = orig_rx_filter = rx_filter;
+		err = ioctl(fd, SIOCSHWTSTAMP, &ifreq);
+		if (err < 0) {
+			pr_info("driver rejected most general HWTSTAMP filter");
+
+			init_ifreq(&ifreq, &cfg, device);
+			cfg.tx_type   = tx_type;
+			cfg.rx_filter = orig_rx_filter = rx_filter2;
+
+			err = ioctl(fd, SIOCSHWTSTAMP, &ifreq);
+			if (err < 0) {
+				pr_err("ioctl SIOCSHWTSTAMP failed: %m");
+				return err;
+			}
+		}
+		if (cfg.rx_filter == HWTSTAMP_FILTER_SOME)
+			cfg.rx_filter = orig_rx_filter;
+		break;
+	}
+
+	if (cfg.tx_type != tx_type ||
+	    (cfg.rx_filter != rx_filter &&
+	     cfg.rx_filter != rx_filter2 &&
+	     cfg.rx_filter != HWTSTAMP_FILTER_ALL)) {
+		pr_debug("tx_type   %d not %d", cfg.tx_type, tx_type);
+		pr_debug("rx_filter %d not %d or %d", cfg.rx_filter, rx_filter,
+			 rx_filter2);
+		pr_err("The current filter does not match the required");
+		return -1;
 	}
 
 	return 0;
@@ -159,10 +216,132 @@ failed:
 	return -1;
 }
 
+int sk_get_if_info(const char *name, struct sk_if_info *if_info)
+{
+#ifdef ETHTOOL_GLINKSETTINGS
+	struct ifreq ifr;
+	int fd, err;
+
+	struct {
+		struct ethtool_link_settings req;
+		/*
+		 * link_mode_data consists of supported[], advertising[],
+		 * lp_advertising[] with size up to 127 each.
+		 * The actual size is provided by the kernel.
+		 */
+		__u32 link_mode_data[3 * 127];
+	} ecmd;
+
+	memset(&ifr, 0, sizeof(ifr));
+	memset(&ecmd, 0, sizeof(ecmd));
+
+	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (fd < 0) {
+		goto failed;
+	}
+
+	ecmd.req.cmd = ETHTOOL_GLINKSETTINGS;
+
+	strncpy(ifr.ifr_name, name, IFNAMSIZ - 1);
+	ifr.ifr_data = (char *) &ecmd;
+
+	/* Handshake with kernel to determine number of words for link
+	 * mode bitmaps. When requested number of bitmap words is not
+	 * the one expected by kernel, the latter returns the integer
+	 * opposite of what it is expecting. We request length 0 below
+	 * (aka. invalid bitmap length) to get this info.
+	 */
+	err = ioctl(fd, SIOCETHTOOL, &ifr);
+	if (err < 0) {
+		pr_err("ioctl SIOCETHTOOL failed: %m");
+		close(fd);
+		goto failed;
+	}
+
+	if (ecmd.req.link_mode_masks_nwords >= 0 ||
+			ecmd.req.cmd != ETHTOOL_GLINKSETTINGS) {
+		return 1;
+	}
+	ecmd.req.link_mode_masks_nwords = -ecmd.req.link_mode_masks_nwords;
+
+	err = ioctl(fd, SIOCETHTOOL, &ifr);
+	if (err < 0) {
+		pr_err("ioctl SIOCETHTOOL failed: %m");
+		close(fd);
+		goto failed;
+	}
+
+	close(fd);
+
+	/* copy the necessary data to sk_info */
+	memset(if_info, 0, sizeof(struct sk_if_info));
+	if_info->valid = 1;
+#ifdef KSZ_1588_PTP
+	if (!ecmd.req.speed)
+		ecmd.req.speed = 100;
+#endif
+	if_info->speed = ecmd.req.speed;
+
+	/* Megabits per second converted to attoseconds per bit */
+	if_info->iface_bit_period = (1000000000000ULL/if_info->speed);
+	return 0;
+failed:
+#endif
+	/* clear data and ensure it is not marked valid */
+	memset(if_info, 0, sizeof(struct sk_if_info));
+	return -1;
+}
+
+
+static int sk_interface_guidaddr(const char *name, unsigned char *guid)
+{
+	char file_name[64], buf[64], addr[8];
+	FILE *f;
+	char *err;
+	int res;
+
+	snprintf(file_name, sizeof buf, "/sys/class/net/%s/address", name);
+	f = fopen(file_name, "r");
+	if (!f) {
+		pr_err("failed to open %s: %m", buf);
+		return -1;
+	}
+
+	/* Set the file position to the beginning of the GUID */
+	res = fseek(f, GUID_OFFSET, SEEK_SET);
+	if (res) {
+		pr_err("fseek failed: %m");
+		goto error;
+	}
+
+	err = fgets(buf, sizeof buf, f);
+	if (err == NULL) {
+		pr_err("fseek failed: %m");
+		goto error;
+	}
+
+	res = sscanf(buf, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+			   &addr[0], &addr[1], &addr[2], &addr[3],
+			   &addr[4], &addr[5], &addr[6], &addr[7]);
+	if (res != GUID_LEN) {
+		pr_err("sscanf failed: %m");
+		goto error;
+	}
+
+	memcpy(guid, addr, GUID_LEN);
+	fclose(f);
+
+	return 0;
+
+error:
+	fclose(f);
+	return -1;
+}
+
 int sk_interface_macaddr(const char *name, struct address *mac)
 {
 	struct ifreq ifreq;
-	int err, fd;
+	int err, fd, type;
 
 	memset(&ifreq, 0, sizeof(ifreq));
 	strncpy(ifreq.ifr_name, name, sizeof(ifreq.ifr_name) - 1);
@@ -180,11 +359,26 @@ int sk_interface_macaddr(const char *name, struct address *mac)
 		return -1;
 	}
 
-	mac->sll.sll_family = AF_PACKET;
-	mac->sll.sll_halen = MAC_LEN;
-	memcpy(mac->sll.sll_addr, &ifreq.ifr_hwaddr.sa_data, MAC_LEN);
-	mac->len = sizeof(mac->sll);
 	close(fd);
+
+	/* Get interface type */
+	type = ifreq.ifr_hwaddr.sa_family;
+	switch (type) {
+		case ARPHRD_INFINIBAND:
+			err = sk_interface_guidaddr(name, mac->sll.sll_addr);
+			if (err) {
+				pr_err("fail to get address using sysfs: %m");
+				return -1;
+			}
+			mac->sll.sll_halen = EUI64;
+			break;
+		default:
+			memcpy(mac->sll.sll_addr, &ifreq.ifr_hwaddr.sa_data, MAC_LEN);
+			mac->sll.sll_halen = EUI48;
+	}
+
+	mac->sll.sll_family = AF_PACKET;
+	mac->len = sizeof(mac->sll);
 	return 0;
 }
 
@@ -248,14 +442,15 @@ int sk_receive(int fd, void *buf, int buflen,
 	if (flags == MSG_ERRQUEUE) {
 		struct pollfd pfd = { fd, sk_events, 0 };
 		res = poll(&pfd, 1, sk_tx_timeout);
+		/* Retry once on EINTR to avoid logging errors before exit */
+		if (res < 0 && errno == EINTR)
+			res = poll(&pfd, 1, sk_tx_timeout);
 		if (res < 1) {
-#ifndef KSZ_1588_PTP
 			pr_err(res ? "poll for tx timestamp failed: %m" :
 			             "timed out while polling for tx timestamp");
 			pr_err("increasing tx_timestamp_timeout may correct "
 			       "this issue, but it is likely caused by a driver bug");
-#endif
-			return res;
+			return -errno;
 		} else if (!(pfd.revents & sk_revents)) {
 			pr_err("poll for tx timestamp woke up on non ERR event");
 			return -1;
@@ -263,27 +458,27 @@ int sk_receive(int fd, void *buf, int buflen,
 	}
 
 	cnt = recvmsg(fd, &msg, flags);
-	if (cnt < 1)
+	if (cnt < 0) {
 		pr_err("recvmsg%sfailed: %m",
 		       flags == MSG_ERRQUEUE ? " tx timestamp " : " ");
-
+	}
 	for (cm = CMSG_FIRSTHDR(&msg); cm != NULL; cm = CMSG_NXTHDR(&msg, cm)) {
 		level = cm->cmsg_level;
 		type  = cm->cmsg_type;
 		if (SOL_SOCKET == level && SO_TIMESTAMPING == type) {
 			if (cm->cmsg_len < sizeof(*ts) * 3) {
 				pr_warning("short SO_TIMESTAMPING message");
-				return -1;
+				return -EMSGSIZE;
 			}
 			ts = (struct timespec *) CMSG_DATA(cm);
 		}
 		if (SOL_SOCKET == level && SO_TIMESTAMPNS == type) {
 			if (cm->cmsg_len < sizeof(*sw)) {
 				pr_warning("short SO_TIMESTAMPNS message");
-				return -1;
+				return -EMSGSIZE;
 			}
 			sw = (struct timespec *) CMSG_DATA(cm);
-			hwts->sw = *sw;
+			hwts->sw = timespec_to_tmv(*sw);
 		}
 	}
 
@@ -292,31 +487,59 @@ int sk_receive(int fd, void *buf, int buflen,
 
 	if (!ts) {
 		memset(&hwts->ts, 0, sizeof(hwts->ts));
-		return cnt;
+		return cnt < 0 ? -errno : cnt;
 	}
 
 	switch (hwts->type) {
 	case TS_SOFTWARE:
-		hwts->ts = ts[0];
+		hwts->ts = timespec_to_tmv(ts[0]);
 		break;
 	case TS_HARDWARE:
 	case TS_ONESTEP:
-		hwts->ts = ts[2];
+	case TS_P2P1STEP:
+		hwts->ts = timespec_to_tmv(ts[2]);
 		break;
 	case TS_LEGACY_HW:
-		hwts->ts = ts[1];
+		hwts->ts = timespec_to_tmv(ts[1]);
 		break;
 	}
-	return cnt;
+	return cnt < 0 ? -errno : cnt;
 }
 
-int sk_set_priority(int fd, uint8_t dscp)
+int sk_get_error(int fd)
 {
-	int tos;
+	socklen_t len;
+	int error;
+
+	len = sizeof (error);
+	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0) {
+		pr_err("getsockopt SO_ERROR failed: %m");
+		return -1;
+	}
+
+	return error;
+}
+
+int sk_set_priority(int fd, int family, uint8_t dscp)
+{
+	int level, optname, tos;
 	socklen_t tos_len;
 
+	switch (family) {
+	case AF_INET:
+		level = IPPROTO_IP;
+		optname = IP_TOS;
+		break;
+	case AF_INET6:
+		level = IPPROTO_IPV6;
+		optname = IPV6_TCLASS;
+		break;
+	default:
+		return -1;
+	}
+
 	tos_len = sizeof(tos);
-	if (getsockopt(fd, SOL_IP, IP_TOS, &tos, &tos_len) < 0) {
+	if (getsockopt(fd, level, optname, &tos, &tos_len) < 0) {
 		tos = 0;
 	}
 
@@ -326,7 +549,7 @@ int sk_set_priority(int fd, uint8_t dscp)
 	/* set new DSCP value */
 	tos |= dscp<<2;
 	tos_len = sizeof(tos);
-	if (setsockopt(fd, SOL_IP, IP_TOS, &tos, tos_len) < 0) {
+	if (setsockopt(fd, level, optname, &tos, tos_len) < 0) {
 		return -1;
 	}
 
@@ -334,7 +557,23 @@ int sk_set_priority(int fd, uint8_t dscp)
 }
 
 #ifdef KSZ_1588_PTP
-int sk_timestamping_close(int fd, const char *device, enum timestamp_type type)
+static int hwts_filt(int fd, const char *device, int rx_filter, int tx_type)
+{
+	struct ifreq ifreq;
+	struct hwtstamp_config cfg;
+
+	init_ifreq(&ifreq, &cfg, device);
+
+	cfg.rx_filter = rx_filter;
+	cfg.tx_type   = tx_type;
+	return ioctl(fd, SIOCSHWTSTAMP, &ifreq);
+}
+
+static int last_rx_filter;
+static int last_tx_type;
+static int last_ts_type;
+
+int sk_timestamping_close(int fd, const char *device)
 {
 	struct ifreq ifreq;
 	struct hwtstamp_config cfg;
@@ -342,15 +581,12 @@ int sk_timestamping_close(int fd, const char *device, enum timestamp_type type)
 	char *s;
 	char tmp[20];
 
-	if (type != TS_HARDWARE && type != TS_ONESTEP)
+	if (last_ts_type != TS_HARDWARE && last_ts_type != TS_ONESTEP &&
+	    last_ts_type != TS_P2P1STEP)
 		return 0;
 
-	memset(&ifreq, 0, sizeof(ifreq));
-	memset(&cfg, 0, sizeof(cfg));
+	init_ifreq(&ifreq, &cfg, device);
 
-	strncpy(ifreq.ifr_name, device, sizeof(ifreq.ifr_name));
-
-	ifreq.ifr_data = (void *) &cfg;
 	cfg.tx_type    = HWTSTAMP_TX_OFF;
 	cfg.rx_filter  = HWTSTAMP_FILTER_NONE;
 	err = ioctl(fd, SIOCSHWTSTAMP, &ifreq);
@@ -368,16 +604,32 @@ int sk_timestamping_close(int fd, const char *device, enum timestamp_type type)
 	}
 	return err;
 }
+
+int sk_timestamping_filt(int fd, const char *device, int rx_sync)
+{
+	int rx_filter = HWTSTAMP_FILTER_PTP_V2_EVENT;
+
+	if (last_rx_filter == HWTSTAMP_FILTER_PTP_V2_L4_EVENT)
+		rx_filter = rx_sync ?
+			    HWTSTAMP_FILTER_PTP_V2_L4_SYNC :
+			    HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ;
+	else if (last_rx_filter == HWTSTAMP_FILTER_PTP_V2_L2_EVENT)
+		rx_filter = rx_sync ?
+			    HWTSTAMP_FILTER_PTP_V2_L2_SYNC :
+			    HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ;
+	else
+		rx_filter = rx_sync ?
+			    HWTSTAMP_FILTER_PTP_V2_SYNC :
+			    HWTSTAMP_FILTER_PTP_V2_DELAY_REQ;
+	return hwts_filt(fd, device, rx_filter, last_tx_type);
+}
 #endif
 
 int sk_timestamping_init(int fd, const char *device, enum timestamp_type type,
-			 enum transport_type transport)
+			 enum transport_type transport, int vclock)
 {
-	int err, filter1, filter2 = 0, flags, one_step;
-#ifdef KSZ_1588_PTP
-	char *s;
-	char tmp[20];
-#endif
+	int err, filter1, filter2 = 0, flags, tx_type = HWTSTAMP_TX_ON;
+	struct so_timestamping timestamping;
 
 	switch (type) {
 	case TS_SOFTWARE:
@@ -387,6 +639,7 @@ int sk_timestamping_init(int fd, const char *device, enum timestamp_type type,
 		break;
 	case TS_HARDWARE:
 	case TS_ONESTEP:
+	case TS_P2P1STEP:
 		flags = SOF_TIMESTAMPING_TX_HARDWARE |
 			SOF_TIMESTAMPING_RX_HARDWARE |
 			SOF_TIMESTAMPING_RAW_HARDWARE;
@@ -402,7 +655,21 @@ int sk_timestamping_init(int fd, const char *device, enum timestamp_type type,
 
 	if (type != TS_SOFTWARE) {
 		filter1 = HWTSTAMP_FILTER_PTP_V2_EVENT;
-		one_step = type == TS_ONESTEP ? 1 : 0;
+		switch (type) {
+		case TS_SOFTWARE:
+			tx_type = HWTSTAMP_TX_OFF;
+			break;
+		case TS_HARDWARE:
+		case TS_LEGACY_HW:
+			tx_type = HWTSTAMP_TX_ON;
+			break;
+		case TS_ONESTEP:
+			tx_type = HWTSTAMP_TX_ONESTEP_SYNC;
+			break;
+		case TS_P2P1STEP:
+			tx_type = HWTSTAMP_TX_ONESTEP_P2P;
+			break;
+		}
 		switch (transport) {
 		case TRANS_UDP_IPV4:
 		case TRANS_UDP_IPV6:
@@ -417,35 +684,34 @@ int sk_timestamping_init(int fd, const char *device, enum timestamp_type type,
 		case TRANS_UDS:
 			return -1;
 		}
+		err = hwts_init(fd, device, filter1, filter2, tx_type);
+
 #ifdef KSZ_1588_PTP
-		err = hwts_init(fd, device, filter1, one_step);
-		if (err) {
-			s = strchr(device, '.');
-			if (s) {
-				int n = s - device;
-
-				strncpy(tmp, device, n);
-				tmp[n] = '\0';
-				device = tmp;
-			}
+		/* Older kernels do not know about this. */
+		if (err && tx_type == HWTSTAMP_TX_ONESTEP_P2P) {
+			tx_type = HWTSTAMP_TX_ONESTEP_SYNC;
+			err = hwts_init(fd, device, filter1, filter2, tx_type);
 		}
-
-		/* Do not call twice if no error. */
-		if (err)
 #endif
-		err = hwts_init(fd, device, filter1, one_step);
-		if (err) {
-			pr_info("driver rejected most general HWTSTAMP filter");
-			err = hwts_init(fd, device, filter2, one_step);
-			if (err) {
-				pr_err("ioctl SIOCSHWTSTAMP failed: %m");
-				return err;
-			}
+		if (err)
+			return err;
+#ifdef KSZ_1588_PTP
+		if (!last_rx_filter) {
+			last_rx_filter = filter2;
+			last_tx_type = tx_type;
+			last_ts_type = type;
 		}
+#endif
 	}
 
+	if (vclock >= 0)
+		flags |= SOF_TIMESTAMPING_BIND_PHC;
+
+	timestamping.flags = flags;
+	timestamping.bind_phc = vclock;
+
 	if (setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING,
-		       &flags, sizeof(flags)) < 0) {
+		       &timestamping, sizeof(timestamping)) < 0) {
 		pr_err("ioctl SO_TIMESTAMPING failed: %m");
 		return -1;
 	}

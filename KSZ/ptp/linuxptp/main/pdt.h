@@ -22,7 +22,12 @@
 
 #include <stdint.h>
 
-enum {FALSE, TRUE};
+#ifndef FALSE
+#define FALSE	0
+#endif
+#ifndef TRUE
+#define TRUE	1
+#endif
 
 typedef	int       Boolean;
 typedef uint8_t   Enumeration8;
@@ -34,6 +39,7 @@ typedef uint16_t  UInteger16;
 typedef int32_t   Integer32;
 typedef uint32_t  UInteger32;
 typedef int64_t   Integer64;
+typedef uint64_t  UInteger64; /* ITU-T G.8275.2 */
 typedef uint8_t   Octet;
 
 #endif

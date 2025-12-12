@@ -26,7 +26,13 @@
 #include "fd.h"
 #include "msg.h"
 
+#ifdef KSZ_1588_PTP
+#define KSZ_1588_PTP_DELAYED_TX_TIMESTAMP
+#define KSZ_1588_PTP_HW
+#endif
+
 struct config;
+struct interface;
 
 /* Values from networkProtocol enumeration 7.4.1 Table 3 */
 enum transport_type {
@@ -56,13 +62,20 @@ struct transport;
 
 int transport_close(struct transport *t, struct fdarray *fda);
 
-int transport_open(struct transport *t, const char *name,
+int transport_open(struct transport *t, struct interface *iface,
 		   struct fdarray *fda, enum timestamp_type tt);
 
 int transport_recv(struct transport *t, int fd, struct ptp_message *msg);
 
 #ifdef KSZ_1588_PTP
-int transport_recv_err(struct transport *t, int fd, struct ptp_message *msg);
+#ifdef KSZ_1588_PTP_DELAYED_TX_TIMESTAMP
+int transport_rerr(struct transport *t, int fd, struct ptp_message *msg);
+#endif
+
+#ifdef KSZ_1588_PTP_HW
+int transport_filt(struct transport *t, struct interface *iface, int fd,
+		   int rx_sync);
+#endif
 #endif
 
 /**
@@ -71,12 +84,12 @@ int transport_recv_err(struct transport *t, int fd, struct ptp_message *msg);
  * ptp_message itself is ignored.
  * @param t	The transport.
  * @param fda	The array of descriptors filled in by transport_open.
- * @param event	1 for event message, 0 for general message.
+ * @param event	One of the @ref transport_event enumeration values.
  * @param msg	The message to send.
- * @return	Number of bytes send, or negative value in case of an error.
+ * @return	Number of bytes sent, or negative value in case of an error.
  */
-int transport_send(struct transport *t, struct fdarray *fda, int event,
-		   struct ptp_message *msg);
+int transport_send(struct transport *t, struct fdarray *fda,
+		   enum transport_event event, struct ptp_message *msg);
 
 /**
  * Sends the PTP message using the given transport. The message is sent to
@@ -84,37 +97,36 @@ int transport_send(struct transport *t, struct fdarray *fda, int event,
  * address), any address field in the ptp_message itself is ignored.
  * @param t	The transport.
  * @param fda	The array of descriptors filled in by transport_open.
- * @param event	1 for event message, 0 for general message.
+ * @param event	One of the @ref transport_event enumeration values.
  * @param msg	The message to send.
- * @return	Number of bytes send, or negative value in case of an error.
+ * @return	Number of bytes sent, or negative value in case of an error.
  */
-int transport_peer(struct transport *t, struct fdarray *fda, int event,
-		   struct ptp_message *msg);
+int transport_peer(struct transport *t, struct fdarray *fda,
+		   enum transport_event event, struct ptp_message *msg);
 
 /**
  * Sends the PTP message using the given transport. The address has to be
  * provided in the address field of the message.
  * @param t	The transport.
  * @param fda	The array of descriptors filled in by transport_open.
- * @param event	1 for event message, 0 for general message.
+ * @param event	One of the @ref transport_event enumeration values.
  * @param msg	The message to send. The address of the destination has to
  *		be set in the address field.
- * @return	Number of bytes send, or negative value in case of an error.
+ * @return	Number of bytes sent, or negative value in case of an error.
  */
-int transport_sendto(struct transport *t, struct fdarray *fda, int event,
-		     struct ptp_message *msg);
+int transport_sendto(struct transport *t, struct fdarray *fda,
+		     enum transport_event event, struct ptp_message *msg);
 
 /**
  * Fetches the transmit time stamp for a PTP message that was sent
  * with the TRANS_DEFER_EVENT flag.
  *
- * @param t	The transport.
  * @param fda	The array of descriptors filled in by transport_open.
  * @param msg	The message previously sent using transport_send(),
  *              transport_peer(), or transport_sendto().
  * @return	Zero on success, or negative value in case of an error.
  */
-int transport_txts(struct transport *t, struct fdarray *fda,
+int transport_txts(struct fdarray *fda,
 		   struct ptp_message *msg);
 
 /**

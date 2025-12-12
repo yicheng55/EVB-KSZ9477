@@ -23,7 +23,7 @@
 #include "dm.h"
 #include "ds.h"
 #include "config.h"
-#include "fsm.h"
+#include "monitor.h"
 #include "notification.h"
 #include "servo.h"
 #include "tlv.h"
@@ -41,10 +41,15 @@ enum clock_type {
 	CLOCK_TYPE_P2P        = 0x2000,
 	CLOCK_TYPE_E2E        = 0x1000,
 	CLOCK_TYPE_MANAGEMENT = 0x0800,
-#ifdef KSZ_1588_PTP
-	CLOCK_TYPE_TRANSPARENT = 0x0400,
-#endif
 };
+
+/**
+ * Appends the active time zone TLVs to a given message.
+ * @param c          The clock instance.
+ * @param m          The message that will receive the TLVs.
+ * @return           Zero on success, non-zero otherwise.
+ */
+int clock_append_timezones(struct clock *c, struct ptp_message *m);
 
 /**
  * Obtains a reference to the best foreign master of a clock.
@@ -75,6 +80,28 @@ UInteger8 clock_class(struct clock *c);
  * @return   A pointer to the configuration, without fail.
  */
 struct config *clock_config(struct clock *c);
+
+/**
+ * Obtains a reference to the current dataset.
+ * @param c  The clock instance.
+ * @return   A pointer to the current dataset, without fail.
+ */
+struct currentDS *clock_current_dataset(struct clock *c);
+
+/**
+ * Obtains the clock's data set comparison function.
+ * @param c  The clock instance.
+ * @return   A pointer to the data set comparison function, without fail.
+ */
+int (*clock_dscmp(struct clock *c))(struct dataset *a, struct dataset *b);
+
+/**
+ * Obtains the required time stamping mode.
+ * @param c  The clock instance.
+ * @return   The value of required time stamping mode, which is a bit mask
+ *           of SOF_TIMESTAMPING_ flags.
+ */
+int clock_required_modes(struct clock *c);
 
 /**
  * Create a clock instance. There can only be one clock in any system,
@@ -122,8 +149,13 @@ struct port *clock_first_port(struct clock *c);
  * @param f  Pointer to the TLV.
  */
 void clock_follow_up_info(struct clock *c, struct follow_up_info_tlv *f);
-void clock_get_follow_up_info(struct clock *c, struct follow_up_info_tlv *f);
-void clock_set_follow_up_info(struct clock *c);
+
+/**
+ * Determine if a clock is free running or not.
+ * @param c  The clock instance.
+ * @return   One if the clock is free running or zero otherwise.
+ */
+int clock_free_running(struct clock *c);
 
 /**
  * Obtain the gmCapable flag from a clock's default data set.
@@ -148,6 +180,13 @@ struct ClockIdentity clock_identity(struct clock *c);
 void clock_fda_changed(struct clock *c);
 
 /**
+ * Obtains the time of the latest synchronization.
+ * @param c    The clock instance.
+ * @return     The local time stamp of the last received Sync message.
+ */
+tmv_t clock_ingress_time(struct clock *c);
+
+/**
  * Manage the clock according to a given message.
  * @param c    The clock instance.
  * @param p    The port on which the message arrived.
@@ -161,11 +200,10 @@ int clock_manage(struct clock *c, struct port *p, struct ptp_message *msg);
  * Send notification about an event to all subscribers.
  * @param c      The clock instance.
  * @param msg    The PTP message to send, in network byte order.
- * @param msglen The length of the message in bytes.
  * @param event  The event that occured.
  */
 void clock_send_notification(struct clock *c, struct ptp_message *msg,
-			     int msglen, enum notification event);
+			     enum notification event);
 
 /**
  * Construct and send notification to subscribers about an event that
@@ -211,11 +249,39 @@ void clock_peer_delay(struct clock *c, tmv_t ppd, tmv_t req, tmv_t rx,
 		      double nrr);
 
 /**
+ * Set clock sde
+ * @param c     A pointer to a clock instance obtained with clock_create().
+ * @param sde   Pass one (1) if need a decision event and zero if not.
+ */
+void clock_set_sde(struct clock *c, int sde);
+
+/**
  * Poll for events and dispatch them.
  * @param c A pointer to a clock instance obtained with clock_create().
  * @return  Zero on success, non-zero otherwise.
  */
 int clock_poll(struct clock *c);
+
+/**
+ * Obtain the servo struct.
+ * @param c The clock instance.
+ * @return  A pointer to the clock's servo.
+ */
+struct servo *clock_servo(struct clock *c);
+
+/**
+ * Obtain the current state of clock's servo.
+ * @param c The clock instance.
+ * @return  The current state of the clock's servo.
+ */
+enum servo_state clock_servo_state(struct clock *c);
+
+/**
+ * Obtain the slave monitor instance from a clock.
+ * @param c The clock instance.
+ * @return  The slave monitor associated with the clock.
+ */
+struct monitor *clock_slave_monitor(struct clock *c);
 
 /**
  * Obtain the slave-only flag from a clock's default data set.
@@ -225,11 +291,32 @@ int clock_poll(struct clock *c);
 int clock_slave_only(struct clock *c);
 
 /**
+ * Obtain the max steps removed field from a clock's default data set.
+ * @param c  The clock instance.
+ * @return   The value of the clock's max steps removed field.
+ */
+UInteger8 clock_max_steps_removed(struct clock *c);
+
+/**
+ * Obtain the clock class threshold field from a clock's default data set.
+ * @param c  The clock instance.
+ * @return   Configured clock class threshold value.
+ */
+UInteger8 clock_get_clock_class_threshold(struct clock *c);
+
+/**
  * Obtain the steps removed field from a clock's current data set.
  * @param c  The clock instance.
  * @return   The value of the clock's steps removed field.
  */
 UInteger16 clock_steps_removed(struct clock *c);
+
+/**
+ * Obtain the Time Stamp Processor instance from a clock.
+ * @param c The clock instance.
+ * @return  The Time Stamp Processor associated with the clock.
+ */
+struct tsproc *clock_get_tsproc(struct clock *c);
 
 /**
  * Switch to a new PTP Hardware Clock, for use with the "jbod" mode.
@@ -261,11 +348,18 @@ enum servo_state clock_synchronize(struct clock *c, tmv_t ingress,
 void clock_sync_interval(struct clock *c, int n);
 
 /**
+ * Update the clock leap bits and UTC offset after a leap second
+ * if operating as a grandmaster.
+ * @param c  The clock instance.
+ */
+void clock_update_leap_status(struct clock *c);
+
+/**
  * Obtain a clock's time properties data set.
  * @param c  The clock instance.
- * @return   A pointer to the time properties data set of the clock.
+ * @return   A copy of the clock's time properties data set.
  */
-struct timePropertiesDS *clock_time_properties(struct clock *c);
+struct timePropertiesDS clock_time_properties(struct clock *c);
 
 /**
  * Update a clock's time properties data set.
@@ -293,7 +387,7 @@ enum clock_type clock_type(struct clock *c);
  * @param c  The clock instance.
  * @param ts The time stamp.
  */
-void clock_check_ts(struct clock *c, struct timespec ts);
+void clock_check_ts(struct clock *c, uint64_t ts);
 
 /**
  * Obtain ratio between master's frequency and current clock frequency.
@@ -303,46 +397,10 @@ void clock_check_ts(struct clock *c, struct timespec ts);
 double clock_rate_ratio(struct clock *c);
 
 #ifdef KSZ_1588_PTP
-int clock_master_lost(struct clock *c);
-int clock_one_step(struct clock *c);
-int clock_two_step(struct clock *c);
-int clock_two_step_pdelay(struct clock *c);
-int clock_c37_238(struct clock *c);
-
-int all_ports(struct clock *c);
-int need_dest_port(struct clock *c);
-int need_stop_forwarding(struct clock *c);
-int boundary_clock(struct clock *c);
-int transparent_clock(struct clock *c);
-void set_transparent_clock(struct clock *c, int transparent);
-UInteger8 get_hw_version(struct clock *c);
-UInteger8 get_port_cnt(struct clock *c);
-UInteger32 get_min_sync_interval(struct clock *c);
-void set_min_sync_interval(struct clock *c, UInteger32 interval);
-int get_master_port(struct clock *c);
-struct port *get_slave_port(struct clock *c);
-void set_master_port(struct clock *c, int p);
-void set_slave_port(struct clock *c, struct port *p);
-int is_host_port(struct clock *c, struct port *p);
-int is_peer_port(struct clock *c, struct port *p);
-int skip_host_port(struct clock *c, struct port *p);
-void update_dev_cnt(struct clock *c, int cnt);
-int get_dev_cnt(struct clock *c);
-struct port *get_port(struct clock *c, int index);
-void set_master_utc_offset(struct clock *c, int offset);
-int clock_syntonized(struct clock *c);
-void clock_set_port_state(struct clock *c, enum fsm_event event);
-int is_slave_port(struct clock *c, struct port *p);
-int port_dispatched(struct clock *c);
-void clock_port_dispatch(struct clock *c, struct port *p);
-void clock_update_port_grandmaster(struct clock *c);
-void clock_update_state(struct clock *c);
-int skip_sync_check(struct clock *c);
-int get_initialSyncReceiptTimeout(struct clock *c);
-int get_waitPdelayReqInterval(struct clock *c);
-int get_waitSyncInterval(struct clock *c);
-void get_hw_clock(struct clock *c, struct timespec *ts);
-void exception_log(struct clock *c, char const *format, ...);
+#ifdef KSZ_1588_PTP_HW
+int clock_clear_rx_sync_port(struct clock *c, struct port *p);
+int clock_set_rx_sync_port(struct clock *c, struct port *p);
+#endif
 #endif
 
 #endif

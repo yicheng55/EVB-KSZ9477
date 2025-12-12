@@ -22,6 +22,7 @@
 #define HAVE_PMC_COMMON_H
 
 #include "config.h"
+#include "fsm.h"
 #include "msg.h"
 #include "transport.h"
 
@@ -40,14 +41,15 @@ int pmc_send_get_action(struct pmc *pmc, int id);
 
 int pmc_send_set_action(struct pmc *pmc, int id, void *data, int datasize);
 
-#ifdef KSZ_1588_PTP
-int pmc_send_signaling(struct pmc *pmc, void *data, int datasize);
-#endif
+int pmc_send_set_aton(struct pmc *pmc, int id, uint8_t key, const char *name);
 
 struct ptp_message *pmc_recv(struct pmc *pmc);
 
 int pmc_target(struct pmc *pmc, struct PortIdentity *pid);
 void pmc_target_port(struct pmc *pmc, UInteger16 portNumber);
 void pmc_target_all(struct pmc *pmc);
+
+const char *pmc_action_string(int action);
+int pmc_do_command(struct pmc *pmc, char *str);
 
 #endif
