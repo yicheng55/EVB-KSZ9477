@@ -57,8 +57,26 @@ cd EVB-KSZ9477/KSZ
 ### Step 3: Export KSZ_HOME Variable to KSZ Folder
 
 ```bash
+# KSZ EVB development environment.
+# 只在目前終端機有效（暫時）
 export KSZ_HOME=`pwd`
 ```
+
+Or add the following line to your `~/.bashrc` file:
+```
+# ------------------------------------------------------------
+# KSZ EVB-KSZ9477 development environment setup example
+# KSZ_HOME points to the root directory of the KSZ SDK
+# 只對「某個使用者」永久有效（最常用）
+# ------------------------------------------------------------
+export KSZ_HOME="$HOME/Prg/EVB-KSZ9477/KSZ"
+````
+
+Then, source the `~/.bashrc` file to apply the changes:
+```bash# 使剛剛修改的 ~/.bashrc 生效
+-->$ source ~/.bashrc
+```
+
 
 ### Step 4: Change Directory to Atmel_SOC_SAMA5D3/buildroot
 
