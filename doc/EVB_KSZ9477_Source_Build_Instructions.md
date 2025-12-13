@@ -77,6 +77,13 @@ Then, source the `~/.bashrc` file to apply the changes:
 -->$ source ~/.bashrc
 ```
 
+要讓 KSZ_HOME 在每個新終端都自動設定，需要加入到 shell 配置文件中：
+```bash
+echo 'export KSZ_HOME=/home/user1/Prg/EVB-KSZ9477/KSZ' >> ~/.bashrc
+source ~/.bashrc
+echo $KSZ_HOME
+```
+
 
 ### Step 4: Change Directory to Atmel_SOC_SAMA5D3/buildroot
 
