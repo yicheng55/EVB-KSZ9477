@@ -356,6 +356,35 @@ make
 
 所有 Buildroot 套件都支援以下標準管理指令。將 `<package>` 替換為實際的套件名稱（如 `ksz_ptp_scripts`、`linux`、`ksz_linuxptp` 等）。
 
+#### 本專案主要套件清單
+
+本專案（EVB-KSZ9477）中的 Microchip 相關套件如下：
+
+| 套件名稱 | 說明 | 位置 |
+|---------|------|------|
+| `ksz_linuxptp` | LinuxPTP 元套件（符號連結至指定版本） | `package/microchip/ksz_linuxptp/` |
+| `ksz_linuxptp-3.1.1` | LinuxPTP 版本 3.1.1 | `package/microchip/ksz_linuxptp-3.1.1/` |
+| `ksz_linuxptp-4.0.0` | LinuxPTP 版本 4.0.0 | `package/microchip/ksz_linuxptp-4.0.0/` |
+| `ksz_ptp_scripts` | PTP 配置文件和腳本 | `package/microchip/ksz_ptp_scripts/` |
+| `ksz_ptp_cli` | PTP 命令行工具 | `package/microchip/ksz_ptp_cli/` |
+| `ksz_ptp_test` | PTP 測試工具 | `package/microchip/ksz_ptp_test/` |
+| `ksz_regs_bin` | 寄存器二進制工具 | `package/microchip/ksz_regs_bin/` |
+| `ksz_OpenAVB` | AVB/TSN 協議棧 | `package/microchip/ksz_OpenAVB/` |
+| `mdio-tool` | MDIO 寄存器訪問工具 | `package/microchip/mdio-tool/` |
+| `web_gui` | Web 管理界面 | `package/microchip/web_gui/` |
+| `ksz_lan8770_app` | LAN8770 應用程式 | `package/microchip/ksz_lan8770_app/` |
+| `linux` | Linux 內核（系統核心） | `Buildroot 內置 |
+
+**常用系統級套件（非 Microchip 特定）：**
+
+| 套件名稱 | 說明 |
+|---------|------|
+| `linux` | Linux 內核主要編譯目標 |
+| `busybox` | 輕量級 UNIX 工具集 |
+| `dropbear` | SSH 客戶端和伺服器 |
+| `util-linux` | 系統管理工具 |
+| `e2fsprogs` | ext2/3/4 文件系統工具 |
+
 #### 清除與重建相關
 
 ```bash
