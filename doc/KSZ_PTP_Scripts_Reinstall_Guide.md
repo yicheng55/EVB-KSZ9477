@@ -354,24 +354,100 @@ make
 
 ### 套件管理指令
 
+所有 Buildroot 套件都支援以下標準管理指令。將 `<package>` 替換為實際的套件名稱（如 `ksz_ptp_scripts`、`linux`、`ksz_linuxptp` 等）。
+
+#### 清除與重建相關
+
 ```bash
-# 顯示套件資訊
-make ksz_ptp_scripts-show-info
+# 清除套件編譯產物（刪除 build/<package>-* 目錄）
+# 下次執行 make 時會重新下載、解壓和編譯
+make <package>-dirclean
 
-# 顯示套件依賴
-make ksz_ptp_scripts-show-depends
+# 重新編譯套件（保留配置，從編譯步驟重新開始）
+# 用於源碼修改後快速重新編譯，不刪除 build 目錄
+make <package>-rebuild
 
-# 清除套件（刪除 build 目錄）
+# 重新配置套件（清除 build 目錄，重新執行 configure）
+# 用於修改配置選項後的重新配置
+make <package>-reconfigure
+```
+
+#### 安裝相關
+
+```bash
+# 重新安裝套件到 target 目錄
+# 用於安裝步驟失敗或 target 文件被誤刪後重新安裝
+make <package>-reinstall
+
+# 重新構建和安裝（完整重建流程）
+# 等同於先執行 rebuild，再執行 reinstall
+make <package>-rebuild make <package>-reinstall
+```
+
+#### 查詢與調試相關
+
+```bash
+# 顯示套件資訊（名稱、版本、位置等）
+make <package>-show-info
+
+# 顯示套件依賴（此套件依賴的其他套件）
+make <package>-show-depends
+
+# 顯示本套件被哪些套件依賴
+make <package>-show-dependents
+
+# 顯示該套件的下載源位置
+make <package>-show-download-dir
+
+# 顯示套件版本和其他詳細資訊
+make <package>-show-vars
+```
+
+#### 常見使用場景
+
+| 場景 | 命令 | 說明 |
+|------|------|------|
+| **修改配置文件** | `make <pkg>-dirclean && make <pkg>-reinstall` | 完全重新安裝新配置 |
+| **修改源碼** | `make <pkg>-rebuild` | 快速重新編譯（保留配置） |
+| **檢查依賴** | `make <pkg>-show-depends` | 查看該套件依賴什麼 |
+| **查詢套件資訊** | `make <pkg>-show-info` | 顯示版本、位置等資訊 |
+| **安裝失敗修復** | `make <pkg>-reinstall` | 重新安裝到 target 目錄 |
+
+#### 具體例子
+
+```bash
+# ========== Linux 內核相關 ==========
+# 清除 Linux 編譯產物
+make linux-dirclean
+
+# 重新編譯 Linux 內核
+make linux-rebuild
+
+# 顯示 Linux 內核資訊
+make linux-show-info
+
+# ========== KSZ LinuxPTP 相關 ==========
+# 清除 ksz_linuxptp 編譯產物
+make ksz_linuxptp-dirclean
+
+# 重新編譯 ksz_linuxptp
+make ksz_linuxptp-rebuild
+
+# 重新安裝 ksz_linuxptp 到 target
+make ksz_linuxptp-reinstall
+
+# 顯示 ksz_linuxptp 依賴
+make ksz_linuxptp-show-depends
+
+# ========== PTP 腳本相關 ==========
+# 清除 ksz_ptp_scripts 編譯產物
 make ksz_ptp_scripts-dirclean
 
-# 重新配置套件
-make ksz_ptp_scripts-reconfigure
-
-# 重新安裝到 target
+# 重新安裝 ksz_ptp_scripts
 make ksz_ptp_scripts-reinstall
 
-# 重新編譯（從 build 步驟開始）
-make ksz_ptp_scripts-rebuild
+# 顯示 ksz_ptp_scripts 資訊
+make ksz_ptp_scripts-show-info
 ```
 
 ### 系統管理指令
