@@ -98,6 +98,11 @@ Decide whether you need NAND flash image or SD card image:
 *** 原始檔 .pdf 說明錯誤，已修正如下 ***
 
 **For NAND flash image:**
+
+Ubuntu 20.04.5 LTS x86-64 要先安裝 32-bit 套件
+```bash
+sudo apt-get update && sudo apt-get install -y libc6-i386 lib32stdc++6 lib32z1
+```
 ```bash
 make atmel_sama5d3_xplained_ksz_5_4_defconfig
 ```
