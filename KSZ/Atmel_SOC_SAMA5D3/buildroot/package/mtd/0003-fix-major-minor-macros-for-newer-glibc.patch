@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Buildroot User <user@localhost>
+Date: Mon, 16 Dec 2025 13:15:00 +0800
+Subject: [PATCH] mtd-utils: fix major/minor/makedev macros for newer glibc
+
+In glibc 2.25 and later, the major(), minor() and makedev() macros
+are defined in <sys/sysmacros.h> instead of being implicitly included
+through <sys/types.h>. This patch adds the necessary include to fix
+the build with newer glibc versions.
+
+Signed-off-by: Buildroot User <user@localhost>
+---
+ jffs2reader.c           |  1 +
+ lib/libmtd.c            |  1 +
+ lib/libmtd_legacy.c     |  1 +
+ mkfs.jffs2.c            |  1 +
+ mkfs.ubifs/mkfs.ubifs.h |  1 +
+ ubi-utils/libubi.c      |  1 +
+ 6 files changed, 6 insertions(+)
+
+diff --git a/jffs2reader.c b/jffs2reader.c
+index aaaaaaa..bbbbbbb 100644
+--- a/jffs2reader.c
++++ b/jffs2reader.c
+@@ -73,6 +73,7 @@ BUGS:
+ #include <time.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#include <sys/sysmacros.h>
+ #include <dirent.h>
+ #include <zlib.h>
+ 
+diff --git a/lib/libmtd.c b/lib/libmtd.c
+index aaaaaaa..bbbbbbb 100644
+--- a/lib/libmtd.c
++++ b/lib/libmtd.c
+@@ -31,6 +31,7 @@
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <sys/ioctl.h>
++#include <sys/sysmacros.h>
+ #include <inttypes.h>
+ 
+ #include <mtd/mtd-user.h>
+diff --git a/lib/libmtd_legacy.c b/lib/libmtd_legacy.c
+index aaaaaaa..bbbbbbb 100644
+--- a/lib/libmtd_legacy.c
++++ b/lib/libmtd_legacy.c
+@@ -31,6 +31,7 @@
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <sys/ioctl.h>
++#include <sys/sysmacros.h>
+ #include <mtd/mtd-user.h>
+ 
+ #include <libmtd.h>
+diff --git a/mkfs.jffs2.c b/mkfs.jffs2.c
+index aaaaaaa..bbbbbbb 100644
+--- a/mkfs.jffs2.c
++++ b/mkfs.jffs2.c
+@@ -52,6 +52,7 @@
+ #include <sys/types.h>
+ #include <stdio.h>
+ #include <sys/stat.h>
++#include <sys/sysmacros.h>
+ #include <unistd.h>
+ #include <sys/mman.h>
+ #include <fcntl.h>
+diff --git a/mkfs.ubifs/mkfs.ubifs.h b/mkfs.ubifs/mkfs.ubifs.h
+index aaaaaaa..bbbbbbb 100644
+--- a/mkfs.ubifs/mkfs.ubifs.h
++++ b/mkfs.ubifs/mkfs.ubifs.h
+@@ -38,6 +38,7 @@
+ #include <getopt.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#include <sys/sysmacros.h>
+ #include <sys/ioctl.h>
+ #include <fcntl.h>
+ #include <dirent.h>
+diff --git a/ubi-utils/libubi.c b/ubi-utils/libubi.c
+index aaaaaaa..bbbbbbb 100644
+--- a/ubi-utils/libubi.c
++++ b/ubi-utils/libubi.c
+@@ -33,6 +33,7 @@
+ #include <sys/ioctl.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#include <sys/sysmacros.h>
+ #include <libubi.h>
+ #include "libubi_int.h"
+ #include "common.h"
+-- 
+2.25.1
