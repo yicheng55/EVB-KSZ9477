@@ -40,6 +40,31 @@ endif
 
 HOST_MTD_DEPENDENCIES = host-zlib host-lzo host-e2fsprogs
 
+define HOST_MTD_FIX_GLIBC_MACROS
+	$(SED) 's/major = 0, minor = 0/dev_major = 0, dev_minor = 0/g' \
+		-e 's/&major, &minor/\&dev_major, \&dev_minor/g' \
+		-e 's/gid, major, minor/gid, dev_major, dev_minor/g' \
+		-e 's/makedev(major, minor/makedev(dev_major, dev_minor/g' \
+		$(@D)/mkfs.ubifs/devtable.c
+	$(SED) 's/int i, major, minor/int i, dev_major, dev_minor/g' \
+		-e 's/major = major/dev_major = major/g' \
+		-e 's/minor = minor/dev_minor = minor/g' \
+		-e 's/int major, minor/int dev_major, dev_minor/g' \
+		-e 's/int i, fd, major, minor/int i, fd, dev_major, dev_minor/g' \
+		-e 's/if (major !=/if (dev_major !=/g' \
+		-e 's/if (minor !=/if (dev_minor !=/g' \
+		-e 's/if (minor ==/if (dev_minor ==/g' \
+		-e 's/== major)/== dev_major)/g' \
+		-e 's/== minor)/== dev_minor)/g' \
+		-e 's/return minor/return dev_minor/g' \
+		-e 's/\<minor - 1/dev_minor - 1/g' \
+		-e 's/, major, minor)/, dev_major, dev_minor)/g' \
+		-e 's/\*major/*dev_major/g' \
+		-e 's/\*minor/*dev_minor/g' \
+		$(@D)/ubi-utils/libubi.c
+endef
+HOST_MTD_POST_PATCH_HOOKS += HOST_MTD_FIX_GLIBC_MACROS
+
 define HOST_MTD_BUILD_CMDS
 	$(HOST_CONFIGURE_OPTS) $(MAKE1) \
 		CROSS= BUILDDIR=$(@D) WITHOUT_XATTR=1 -C $(@D)
