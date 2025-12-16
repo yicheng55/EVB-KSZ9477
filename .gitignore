@@ -73,8 +73,15 @@ u-boot.rom
 *.rej
 .*.sw?
 .DS_Store
+# Ignore patch/diff files except those in tracked directories (whitelist)
 *.patch
 *.diff
+# Whitelist: allow patch files in specific directories
+!KSZ/Atmel_SOC_SAMA5D3/buildroot/package/**/*.patch
+!KSZ/Atmel_SOC_SAMA5D3/buildroot/support/**/*.patch
+!KSZ/Atmel_SOC_SAMA5D3/buildroot/board/**/*.patch
+!KSZ/Atmel_SOC_SAMA5D3/patches/**/*.patch
+!KSZ/linux-drivers/**/*.patch
 
 # VS Code
 .vscode/
